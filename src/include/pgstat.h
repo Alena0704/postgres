@@ -156,6 +156,9 @@ typedef struct PgStat_TableCounts
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+
+	PgStat_Counter rev_all_visible_pages;
+	PgStat_Counter rev_all_frozen_pages;
 } PgStat_TableCounts;
 
 /* ----------
@@ -214,7 +217,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBB
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCBC
 
 typedef struct PgStat_ArchiverStats
 {
@@ -463,6 +466,8 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter total_autoanalyze_time;
 
 	TimestampTz stat_reset_time;
+	PgStat_Counter rev_all_visible_pages;
+	PgStat_Counter rev_all_frozen_pages;
 } PgStat_StatTabEntry;
 
 /* ------
@@ -721,6 +726,17 @@ extern void pgstat_report_analyze(Relation rel,
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
 			(rel)->pgstat_info->counts.blocks_hit++;				\
+	} while (0)
+/* count revocations of all-visible and all-frozen bits in visibility map */
+#define pgstat_count_vm_rev_all_visible(rel)						\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+			(rel)->pgstat_info->counts.rev_all_visible_pages++;	\
+	} while (0)
+#define pgstat_count_vm_rev_all_frozen(rel)						\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+			(rel)->pgstat_info->counts.rev_all_frozen_pages++;	\
 	} while (0)
 
 extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
