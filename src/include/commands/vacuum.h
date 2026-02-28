@@ -25,6 +25,7 @@
 #include "storage/buf.h"
 #include "storage/lock.h"
 #include "utils/relcache.h"
+#include "pgstat.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
@@ -300,6 +301,26 @@ typedef struct VacDeadItemsInfo
 	int64		num_items;		/* current # of entries */
 } VacDeadItemsInfo;
 
+/*
+ * Counters and usage data for extended stats tracking.
+ */
+typedef struct LVExtStatCounters
+{
+	TimestampTz starttime;
+	WalUsage	walusage;
+	BufferUsage bufusage;
+	double		VacuumDelayTime;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
+}			LVExtStatCounters;
+
+typedef struct LVExtStatCountersIdx
+{
+	LVExtStatCounters common;
+	int64		pages_deleted;
+	int64		tuples_removed;
+}			LVExtStatCountersIdx;
+
 /* GUC parameters */
 extern PGDLLIMPORT int default_statistics_target;	/* PGDLLIMPORT for PostGIS */
 extern PGDLLIMPORT int vacuum_freeze_min_age;
@@ -332,6 +353,7 @@ extern PGDLLIMPORT double vacuum_max_eager_freeze_failure_rate;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;
+extern PGDLLIMPORT double VacuumDelayTime;
 
 extern PGDLLIMPORT bool VacuumFailsafeActive;
 extern PGDLLIMPORT double vacuum_cost_delay;
@@ -412,4 +434,8 @@ extern double anl_random_fract(void);
 extern double anl_init_selection_state(int n);
 extern double anl_get_next_S(double t, int n, double *stateptr);
 
+extern void extvac_stats_start_idx(Relation rel, IndexBulkDeleteResult *stats,
+								   LVExtStatCountersIdx * counters);
+extern void extvac_stats_end_idx(Relation rel, IndexBulkDeleteResult *stats,
+								 LVExtStatCountersIdx * counters, PgStat_VacuumRelationCounts * report);
 #endif							/* VACUUM_H */

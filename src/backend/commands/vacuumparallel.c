@@ -868,6 +868,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexBulkDeleteResult *istat = NULL;
 	IndexBulkDeleteResult *istat_res;
 	IndexVacuumInfo ivinfo;
+	LVExtStatCountersIdx extVacCounters;
+	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -875,6 +877,9 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	 */
 	if (indstats->istat_updated)
 		istat = &(indstats->istat);
+
+	/* Set initial statistics values to gather vacuum statistics for the index */
+	extvac_stats_start_idx(indrel, &(indstats->istat), &extVacCounters);
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
@@ -903,6 +908,10 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 				 indstats->status,
 				 RelationGetRelationName(indrel));
 	}
+
+	/* Make extended vacuum stats report for index */
+	extvac_stats_end_idx(indrel, istat_res, &extVacCounters, &extVacReport);
+	pgstat_report_vacuum_extstats(RelationGetRelid(indrel), indrel->rd_rel->relisshared, &extVacReport);
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and
@@ -1054,6 +1063,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 	/* Set cost-based vacuum delay */
 	VacuumUpdateCosts();
 	VacuumCostBalance = 0;
+	VacuumDelayTime = 0;
 	VacuumCostBalanceLocal = 0;
 	VacuumSharedCostBalance = &(shared->cost_balance);
 	VacuumActiveNWorkers = &(shared->active_nworkers);
