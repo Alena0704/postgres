@@ -1076,6 +1076,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexBulkDeleteResult *istat = NULL;
 	IndexBulkDeleteResult *istat_res;
 	IndexVacuumInfo ivinfo;
+	LVExtStatCountersIdx extVacCounters;
+	PgStat_VacuumRelationCounts extVacReport;
 
 	/*
 	 * Update the pointer to the corresponding bulk-deletion result if someone
@@ -1084,6 +1086,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (indstats->istat_updated)
 		istat = &(indstats->istat);
 
+	if (set_report_vacuum_hook)
+		extvac_stats_start_idx(indrel, istat, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1110,6 +1114,13 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 			elog(ERROR, "unexpected parallel vacuum index status %d for index \"%s\"",
 				 indstats->status,
 				 RelationGetRelationName(indrel));
+	}
+
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end_idx(indrel, istat_res, &extVacCounters, &extVacReport);
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, &extVacReport);
 	}
 
 	/*
@@ -1276,6 +1287,7 @@ parallel_vacuum_main(dsm_segment *seg, shm_toc *toc)
 		VacuumUpdateCosts();
 
 	VacuumCostBalance = 0;
+	VacuumDelayTime = 0;
 	VacuumCostBalanceLocal = 0;
 	VacuumSharedCostBalance = &(shared->cost_balance);
 	VacuumActiveNWorkers = &(shared->active_nworkers);

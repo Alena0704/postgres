@@ -21,9 +21,11 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
+#include "executor/instrument.h"
 #include "parser/parse_node.h"
 #include "storage/buf.h"
 #include "utils/relcache.h"
+#include "pgstat.h"
 
 /*
  * Flags for amparallelvacuumoptions to control the participation of bulkdelete
@@ -353,6 +355,33 @@ extern PGDLLIMPORT double vacuum_max_eager_freeze_failure_rate;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;
+
+/* Cumulative storage to report total vacuum delay time (msec). */
+extern PGDLLIMPORT double VacuumDelayTime;
+
+/* Counters for extended vacuum statistics gathering */
+typedef struct LVExtStatCounters
+{
+	TimestampTz starttime;
+	WalUsage	walusage;
+	BufferUsage bufusage;
+	double		VacuumDelayTime;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
+} LVExtStatCounters;
+
+typedef struct LVExtStatCountersIdx
+{
+	LVExtStatCounters common;
+	int64		pages_deleted;
+	int64		tuples_removed;
+} LVExtStatCountersIdx;
+
+extern void extvac_stats_start_idx(Relation rel, IndexBulkDeleteResult *stats,
+								   LVExtStatCountersIdx *counters);
+extern void extvac_stats_end_idx(Relation rel, IndexBulkDeleteResult *stats,
+								 LVExtStatCountersIdx *counters,
+								 PgStat_VacuumRelationCounts *report);
 
 extern PGDLLIMPORT bool VacuumFailsafeActive;
 extern PGDLLIMPORT double vacuum_cost_delay;
