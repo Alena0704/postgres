@@ -94,6 +94,7 @@ typedef struct PgStat_FunctionCounts
  * Working state needed to accumulate per-function-call timing statistics.
  */
 /*
+ * Extended vacuum statistics - passed to extensions via set_report_vacuum_hook.
  * Type of entry: table (heap), index, or database aggregate.
  */
 typedef enum ExtVacReportType
@@ -761,6 +762,16 @@ extern void pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 								 PgStat_Counter deadtuples,
 								 TimestampTz starttime);
 
+extern void pgstat_report_vacuum_ext(Relation rel,
+									 PgStat_Counter livetuples,
+									 PgStat_Counter deadtuples,
+									 TimestampTz starttime,
+									 PgStat_VacuumRelationCounts * extstats);
+
+/* Hook for extensions to receive extended vacuum statistics */
+typedef void (*set_report_vacuum_hook_type) (Oid tableoid, bool shared,
+											 PgStat_VacuumRelationCounts * params);
+extern PGDLLIMPORT set_report_vacuum_hook_type set_report_vacuum_hook;
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter, TimestampTz starttime);
