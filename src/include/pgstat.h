@@ -89,6 +89,64 @@ typedef struct PgStat_FunctionCounts
 /*
  * Working state needed to accumulate per-function-call timing statistics.
  */
+/*
+ * Extended vacuum statistics - passed to extensions via set_report_vacuum_hook.
+ * Type of entry: table (heap), index, or database aggregate.
+ */
+typedef enum ExtVacReportType
+{
+	PGSTAT_EXTVAC_INVALID = 0,
+	PGSTAT_EXTVAC_TABLE = 1,
+	PGSTAT_EXTVAC_INDEX = 2,
+	PGSTAT_EXTVAC_DB = 3,
+} ExtVacReportType;
+
+typedef struct PgStat_CommonCounts
+{
+	int64		total_blks_read;
+	int64		total_blks_hit;
+	int64		total_blks_dirtied;
+	int64		total_blks_written;
+	int64		blks_fetched;
+	int64		blks_hit;
+	int64		wal_records;
+	int64		wal_fpi;
+	uint64		wal_bytes;
+	double		blk_read_time;
+	double		blk_write_time;
+	double		delay_time;
+	double		total_time;
+	int32		wraparound_failsafe_count;
+	int32		interrupts_count;
+	int64		tuples_deleted;
+} PgStat_CommonCounts;
+
+typedef struct PgStat_VacuumRelationCounts
+{
+	PgStat_CommonCounts common;
+	ExtVacReportType type;
+	union
+	{
+		struct
+		{
+			int64		tuples_frozen;
+			int64		recently_dead_tuples;
+			int64		missed_dead_tuples;
+			int64		pages_scanned;
+			int64		pages_removed;
+			int64		vm_new_frozen_pages;
+			int64		vm_new_visible_pages;
+			int64		vm_new_visible_frozen_pages;
+			int64		missed_dead_pages;
+			int64		index_vacuum_count;
+		}			table;
+		struct
+		{
+			int64		pages_deleted;
+		}			index;
+	};
+} PgStat_VacuumRelationCounts;
+
 typedef struct PgStat_FunctionCallUsage
 {
 	/* Link to function's hashtable entry (must still be there at exit!) */
@@ -677,6 +735,17 @@ extern void pgstat_unlink_relation(Relation rel);
 extern void pgstat_report_vacuum(Relation rel, PgStat_Counter livetuples,
 								 PgStat_Counter deadtuples,
 								 TimestampTz starttime);
+
+extern void pgstat_report_vacuum_ext(Relation rel,
+									 PgStat_Counter livetuples,
+									 PgStat_Counter deadtuples,
+									 TimestampTz starttime,
+									 PgStat_VacuumRelationCounts *extstats);
+
+/* Hook for extensions to receive extended vacuum statistics */
+typedef void (*set_report_vacuum_hook_type) (Oid tableoid, bool shared,
+											 PgStat_VacuumRelationCounts *params);
+extern PGDLLIMPORT set_report_vacuum_hook_type set_report_vacuum_hook;
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter, TimestampTz starttime);
