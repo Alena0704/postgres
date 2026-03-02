@@ -33,7 +33,47 @@ CREATE EXTENSION ext_vacuum_statistics;
 Enable statistics collection (in `postgresql.conf` or per session):
 
 ```sql
-SET track_vacuum_statistics = on;
+SET vacuum_statistics.enabled = on;
+```
+
+## Configuration (GUCs)
+
+| GUC | Default | Description |
+|-----|---------|-------------|
+| `vacuum_statistics.enabled` | on | Enable extended vacuum statistics collection |
+| `vacuum_statistics.track` | all | What to track: `all`, `databases`, `relations` |
+| `vacuum_statistics.track_relations` | all | When tracking relations: `all`, `system`, `user` |
+| `vacuum_statistics.track_databases` | (empty) | Comma-separated database OIDs; empty = all |
+| `vacuum_statistics.track_relations_list` | (empty) | Comma-separated relation OIDs; empty = all |
+| `vacuum_statistics.collect` | all | Space-separated list: buffers, wal, tuples, timing, or all |
+
+Examples:
+
+```sql
+-- Track only database-level stats
+SET vacuum_statistics.track = 'databases';
+
+-- Track only user tables (not system catalogs)
+SET vacuum_statistics.track = 'relations';
+SET vacuum_statistics.track_relations = 'user';
+
+-- Only buffers and WAL
+SET vacuum_statistics.collect = 'buffers wal';
+
+-- All except buffers
+SET vacuum_statistics.collect = 'wal tuples timing';
+
+-- Only buffers
+SET vacuum_statistics.collect = 'buffers';
+
+-- Only for specific database OID
+SET vacuum_statistics.track_databases = '16384';
+
+-- Add OIDs via functions (persisted to pg_stat/ext_vacuum_statistics_track.oid)
+SELECT ext_vacuum_statistics.add_track_database(16384);
+SELECT ext_vacuum_statistics.add_track_relation(16385);
+SELECT ext_vacuum_statistics.remove_track_database(16384);
+SELECT ext_vacuum_statistics.remove_track_relation(16385);
 ```
 
 Query the views:

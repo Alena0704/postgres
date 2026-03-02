@@ -1,11 +1,15 @@
 #include "postgres.h"
 
+#include "catalog/catalog.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "storage/fd.h"
+#include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/pgstat_kind.h"
 #include "utils/pgstat_internal.h"
@@ -19,9 +23,24 @@ PG_MODULE_MAGIC;
 #define PGSTAT_KIND_EXTVAC_DB		25
 
 #define SJ_NODENAME		"vacuum_statistics"
+#define EVS_TRACK_FILENAME	"pg_stat/ext_vacuum_statistics_track.oid"
+
+/* Collect mask bits */
+#define EVS_COLLECT_BUFFERS	0x1	/* blks_*, blk_*_time */
+#define EVS_COLLECT_WAL		0x2	/* wal_records, wal_fpi, wal_bytes */
+#define EVS_COLLECT_TUPLES	0x4	/* tuples_deleted, pages_*, vm_*, etc. */
+#define EVS_COLLECT_TIMING	0x8	/* delay_time, total_time */
+#define EVS_COLLECT_ALL		(EVS_COLLECT_BUFFERS | EVS_COLLECT_WAL | \
+							 EVS_COLLECT_TUPLES | EVS_COLLECT_TIMING)
 
 /* --- GUCs --- */
 static bool evs_enabled = true;
+static char *evs_track = "all";		/* 'all', 'databases', 'relations' */
+static char *evs_track_relations = "all";	/* 'all', 'system', 'user' */
+static char *evs_track_databases = "";	/* comma-separated OIDs, empty = all */
+static char *evs_track_relations_list = "";	/* comma-separated OIDs, empty = all */
+static char *evs_collect = "all";	/* space-separated: buffers, wal, tuples, timing, or all */
+static int	evs_collect_mask = EVS_COLLECT_ALL;
 
 /* --- Hook chaining --- */
 static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
@@ -29,35 +48,268 @@ static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
 /* --- Forward declarations --- */
 static void pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
 										 PgStat_VacuumRelationCounts *params);
+static bool evs_oid_in_list(HTAB *hash, Oid oid);
+static bool evs_should_track_relation(Oid dboid, Oid relid);
+static void evs_assign_collect(const char *newval, void *extra);
+static void evs_assign_track_databases(const char *newval, void *extra);
+static void evs_assign_track_relations_list(const char *newval, void *extra);
+static void evs_track_hash_ensure_init(void);
+static void evs_track_parse_guc_to_hash(HTAB *hash, const char *list);
+static void evs_track_save_file(void);
+static void evs_track_load_file(void);
 
 /* objid encoding for relations: (relid << 2) | (type & 3) */
 #define EXTVAC_OBJID(relid, type) (((uint64) (relid)) << 2 | ((type) & 3))
 
-/* Database aggregate: one entry per db, objid = 0 */
-#define EXTVAC_DB_OBJID	0
+/* Hash tables for track_databases and track_relations_list (OID sets) */
+static HTAB *evs_track_databases_hash = NULL;
+static HTAB *evs_track_relations_hash = NULL;
+static bool evs_track_hash_initialized = false;
 
-#define ACCUMULATE_FIELD(field) dst->field += src->field
-#define ACCUMULATE_SUBFIELD(substruct, field) (dst->substruct.field += src->substruct.field)
+static void evs_track_load_file(void);
+
+static void
+evs_track_hash_ensure_init(void)
+{
+	HASHCTL		ctl;
+
+	if (evs_track_hash_initialized)
+		return;
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(Oid);
+	ctl.hcxt = TopMemoryContext;
+
+	evs_track_databases_hash = hash_create("ext_vacuum_statistics track databases",
+										  64, &ctl, HASH_ELEM | HASH_BLOBS);
+	evs_track_relations_hash = hash_create("ext_vacuum_statistics track relations",
+										  64, &ctl, HASH_ELEM | HASH_BLOBS);
+
+	evs_track_load_file();
+	/* GUC values override file: non-empty = parse GUC; empty = clear (track all) */
+	if (evs_track_databases && evs_track_databases[0] != '\0')
+		evs_track_parse_guc_to_hash(evs_track_databases_hash, evs_track_databases);
+	else
+		evs_track_parse_guc_to_hash(evs_track_databases_hash, "");
+	if (evs_track_relations_list && evs_track_relations_list[0] != '\0')
+		evs_track_parse_guc_to_hash(evs_track_relations_hash, evs_track_relations_list);
+	else
+		evs_track_parse_guc_to_hash(evs_track_relations_hash, "");
+	evs_track_hash_initialized = true;
+}
+
+static void
+evs_track_parse_guc_to_hash(HTAB *hash, const char *list)
+{
+	char	   *copy;
+	char	   *p;
+	char	   *tok;
+	Oid			oid;
+	bool		found;
+
+	if (!hash)
+		return;
+
+	/* Clear hash */
+	{
+		HASH_SEQ_STATUS status;
+		Oid		   *entry;
+
+		hash_seq_init(&status, hash);
+		while ((entry = (Oid *) hash_seq_search(&status)) != NULL)
+			hash_search(hash, entry, HASH_REMOVE, &found);
+	}
+
+	if (!list || list[0] == '\0')
+		return;
+
+	copy = pstrdup(list);
+	for (p = copy; (tok = strtok(p, " ,\t")); p = NULL)
+	{
+		char	   *end;
+		unsigned long v;
+
+		v = strtoul(tok, &end, 10);
+		if (tok == end)
+			continue;
+		oid = (Oid) v;
+		hash_search(hash, &oid, HASH_ENTER, &found);
+	}
+	pfree(copy);
+}
+
+static void
+evs_track_load_file(void)
+{
+	char		path[MAXPGPATH];
+	FILE	   *fp;
+	char		buf[256];
+	HTAB	   *curhash = NULL;
+	Oid			oid;
+	bool		found;
+
+	if (!DataDir || DataDir[0] == '\0' || !evs_track_databases_hash || !evs_track_relations_hash)
+		return;
+
+	snprintf(path, sizeof(path), "%s/%s", DataDir, EVS_TRACK_FILENAME);
+	fp = AllocateFile(path, "r");
+	if (!fp)
+		return;
+
+	while (fgets(buf, sizeof(buf), fp))
+	{
+		if (strncmp(buf, "[databases]", 11) == 0)
+		{
+			curhash = evs_track_databases_hash;
+			continue;
+		}
+		if (strncmp(buf, "[relations]", 11) == 0)
+		{
+			curhash = evs_track_relations_hash;
+			continue;
+		}
+		if (curhash && sscanf(buf, "%u", &oid) == 1)
+			hash_search(curhash, &oid, HASH_ENTER, &found);
+	}
+	FreeFile(fp);
+}
+
+static void
+evs_track_save_file(void)
+{
+	char		path[MAXPGPATH];
+	char		tmppath[MAXPGPATH];
+	FILE	   *fp;
+	HASH_SEQ_STATUS status;
+	Oid		   *entry;
+
+	if (!DataDir || DataDir[0] == '\0' || !evs_track_databases_hash || !evs_track_relations_hash)
+		return;
+
+	snprintf(path, sizeof(path), "%s/%s", DataDir, EVS_TRACK_FILENAME);
+	snprintf(tmppath, sizeof(tmppath), "%s/%s.tmp", DataDir, EVS_TRACK_FILENAME);
+	fp = AllocateFile(tmppath, "w");
+	if (!fp)
+		return;
+
+	fprintf(fp, "[databases]\n");
+	hash_seq_init(&status, evs_track_databases_hash);
+	while ((entry = (Oid *) hash_seq_search(&status)) != NULL)
+		fprintf(fp, "%u\n", *entry);
+
+	fprintf(fp, "[relations]\n");
+	hash_seq_init(&status, evs_track_relations_hash);
+	while ((entry = (Oid *) hash_seq_search(&status)) != NULL)
+		fprintf(fp, "%u\n", *entry);
+
+	if (FreeFile(fp) != 0 || rename(tmppath, path) != 0)
+		unlink(tmppath);
+}
+
+static bool
+evs_oid_in_list(HTAB *hash, Oid oid)
+{
+	if (!hash)
+		return true;
+	if (hash_get_num_entries(hash) == 0)
+		return true;
+	return hash_search(hash, &oid, HASH_FIND, NULL) != NULL;
+}
+
+static void
+evs_assign_track_databases(const char *newval, void *extra)
+{
+	evs_track_hash_ensure_init();
+	evs_track_parse_guc_to_hash(evs_track_databases_hash, newval);
+	evs_track_save_file();
+}
+
+static void
+evs_assign_track_relations_list(const char *newval, void *extra)
+{
+	evs_track_hash_ensure_init();
+	evs_track_parse_guc_to_hash(evs_track_relations_hash, newval);
+	evs_track_save_file();
+}
+
+static bool
+evs_should_track_relation(Oid dboid, Oid relid)
+{
+	evs_track_hash_ensure_init();
+
+	if (!evs_oid_in_list(evs_track_databases_hash, dboid))
+		return false;
+	if (strcmp(evs_track, "databases") == 0)
+		return true;			/* will only accumulate to db */
+	if (!evs_oid_in_list(evs_track_relations_hash, relid))
+		return false;
+	if (strcmp(evs_track_relations, "system") == 0)
+		return IsCatalogRelationOid(relid);
+	if (strcmp(evs_track_relations, "user") == 0)
+		return !IsCatalogRelationOid(relid);
+	return true;
+}
+
+static void
+evs_assign_collect(const char *newval, void *extra)
+{
+	int			mask = 0;
+	char	   *copy;
+	char	   *p;
+	char	   *tok;
+
+	if (!newval || newval[0] == '\0')
+	{
+		evs_collect_mask = EVS_COLLECT_ALL;
+		return;
+	}
+
+	copy = pstrdup(newval);
+	for (p = copy; (tok = strtok(p, " \t")); p = NULL)
+	{
+		if (pg_strcasecmp(tok, "all") == 0)
+		{
+			mask = EVS_COLLECT_ALL;
+			break;
+		}
+		if (pg_strcasecmp(tok, "buffers") == 0)
+			mask |= EVS_COLLECT_BUFFERS;
+		else if (pg_strcasecmp(tok, "wal") == 0)
+			mask |= EVS_COLLECT_WAL;
+		else if (pg_strcasecmp(tok, "tuples") == 0)
+			mask |= EVS_COLLECT_TUPLES;
+		else if (pg_strcasecmp(tok, "timing") == 0)
+			mask |= EVS_COLLECT_TIMING;
+		/* ignore unknown tokens */
+	}
+	pfree(copy);
+
+	evs_collect_mask = (mask != 0) ? mask : EVS_COLLECT_ALL;
+}
+
+#define ACCUM_IF(flag, field) \
+	do { if ((evs_collect_mask & (flag)) != 0) dst->field += src->field; } while (0)
 
 static inline void
 pgstat_accumulate_common(PgStat_CommonCounts *dst, const PgStat_CommonCounts *src)
 {
-	ACCUMULATE_FIELD(total_blks_read);
-	ACCUMULATE_FIELD(total_blks_hit);
-	ACCUMULATE_FIELD(total_blks_dirtied);
-	ACCUMULATE_FIELD(total_blks_written);
-	ACCUMULATE_FIELD(blks_fetched);
-	ACCUMULATE_FIELD(blks_hit);
-	ACCUMULATE_FIELD(blk_read_time);
-	ACCUMULATE_FIELD(blk_write_time);
-	ACCUMULATE_FIELD(delay_time);
-	ACCUMULATE_FIELD(total_time);
-	ACCUMULATE_FIELD(wal_records);
-	ACCUMULATE_FIELD(wal_fpi);
-	ACCUMULATE_FIELD(wal_bytes);
-	ACCUMULATE_FIELD(wraparound_failsafe_count);
-	ACCUMULATE_FIELD(interrupts_count);
-	ACCUMULATE_FIELD(tuples_deleted);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, total_blks_read);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, total_blks_hit);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, total_blks_dirtied);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, total_blks_written);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, blks_fetched);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, blks_hit);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, blk_read_time);
+	ACCUM_IF(EVS_COLLECT_BUFFERS, blk_write_time);
+	ACCUM_IF(EVS_COLLECT_TIMING, delay_time);
+	ACCUM_IF(EVS_COLLECT_TIMING, total_time);
+	ACCUM_IF(EVS_COLLECT_WAL, wal_records);
+	ACCUM_IF(EVS_COLLECT_WAL, wal_fpi);
+	ACCUM_IF(EVS_COLLECT_WAL, wal_bytes);
+	dst->wraparound_failsafe_count += src->wraparound_failsafe_count;
+	dst->interrupts_count += src->interrupts_count;
+	ACCUM_IF(EVS_COLLECT_TUPLES, tuples_deleted);
 }
 
 static inline void
@@ -72,22 +324,22 @@ pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts *dst,
 
 	pgstat_accumulate_common(&dst->common, &src->common);
 
-	if (dst->type == PGSTAT_EXTVAC_TABLE)
+	if (dst->type == PGSTAT_EXTVAC_TABLE && (evs_collect_mask & EVS_COLLECT_TUPLES) != 0)
 	{
-		ACCUMULATE_SUBFIELD(table, pages_scanned);
-		ACCUMULATE_SUBFIELD(table, pages_removed);
-		ACCUMULATE_SUBFIELD(table, tuples_frozen);
-		ACCUMULATE_SUBFIELD(table, recently_dead_tuples);
-		ACCUMULATE_SUBFIELD(table, vm_new_frozen_pages);
-		ACCUMULATE_SUBFIELD(table, vm_new_visible_pages);
-		ACCUMULATE_SUBFIELD(table, vm_new_visible_frozen_pages);
-		ACCUMULATE_SUBFIELD(table, missed_dead_pages);
-		ACCUMULATE_SUBFIELD(table, missed_dead_tuples);
-		ACCUMULATE_SUBFIELD(table, index_vacuum_count);
+		dst->table.pages_scanned += src->table.pages_scanned;
+		dst->table.pages_removed += src->table.pages_removed;
+		dst->table.tuples_frozen += src->table.tuples_frozen;
+		dst->table.recently_dead_tuples += src->table.recently_dead_tuples;
+		dst->table.vm_new_frozen_pages += src->table.vm_new_frozen_pages;
+		dst->table.vm_new_visible_pages += src->table.vm_new_visible_pages;
+		dst->table.vm_new_visible_frozen_pages += src->table.vm_new_visible_frozen_pages;
+		dst->table.missed_dead_pages += src->table.missed_dead_pages;
+		dst->table.missed_dead_tuples += src->table.missed_dead_tuples;
+		dst->table.index_vacuum_count += src->table.index_vacuum_count;
 	}
-	else if (dst->type == PGSTAT_EXTVAC_INDEX)
+	else if (dst->type == PGSTAT_EXTVAC_INDEX && (evs_collect_mask & EVS_COLLECT_TUPLES) != 0)
 	{
-		ACCUMULATE_SUBFIELD(index, pages_deleted);
+		dst->index.pages_deleted += src->index.pages_deleted;
 	}
 }
 
@@ -133,11 +385,13 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 
 /*
  * Store incoming vacuum stats into pgstat custom statistics.
- * Also accumulate into database-level entry (dboid, objid=0).
+ * store_relation: create/update per-relation entry
+ * store_db: accumulate into database-level entry (dboid, objid=0)
  */
 static void
 extvac_store(Oid dboid, Oid relid, int type,
-			 PgStat_VacuumRelationCounts *params)
+			 PgStat_VacuumRelationCounts *params,
+			 bool store_relation, bool store_db)
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_ExtVacEntry *shared;
@@ -146,35 +400,37 @@ extvac_store(Oid dboid, Oid relid, int type,
 	if (!evs_enabled)
 		return;
 
-	/* Relation entry: (kind, dboid, (relid<<2)|type) */
-	objid = EXTVAC_OBJID(relid, type);
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_RELATION, dboid, objid, false);
-	if (entry_ref)
+	if (store_relation)
 	{
-		shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-		if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+		objid = EXTVAC_OBJID(relid, type);
+		entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_RELATION, dboid, objid, false);
+		if (entry_ref)
 		{
-			memcpy(&shared->stats, params, sizeof(shared->stats));
-		}
-		else
-		{
+			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
+			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+			{
+				memset(&shared->stats, 0, sizeof(shared->stats));
+				shared->stats.type = params->type;
+			}
 			pgstat_accumulate_extvac_stats(&shared->stats, params);
+			pgstat_unlock_entry(entry_ref);
 		}
-		pgstat_unlock_entry(entry_ref);
 	}
 
-	/* Database aggregate: (kind, dboid, objid=0) */
-	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB, dboid, InvalidOid, false);
-	if (entry_ref)
+	if (store_db)
 	{
-		shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-		if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+		entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB, dboid, InvalidOid, false);
+		if (entry_ref)
 		{
-			memset(&shared->stats, 0, sizeof(shared->stats));
-			shared->stats.type = PGSTAT_EXTVAC_DB;
+			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
+			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
+			{
+				memset(&shared->stats, 0, sizeof(shared->stats));
+				shared->stats.type = PGSTAT_EXTVAC_DB;
+			}
+			pgstat_accumulate_common_for_db(&shared->stats.common, &params->common);
+			pgstat_unlock_entry(entry_ref);
 		}
-		pgstat_accumulate_common_for_db(&shared->stats.common, &params->common);
-		pgstat_unlock_entry(entry_ref);
 	}
 }
 
@@ -183,9 +439,21 @@ pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
 							  PgStat_VacuumRelationCounts *params)
 {
 	Oid			dboid = shared ? InvalidOid : MyDatabaseId;
+	bool		store_relation;
+	bool		store_db;
 
-	extvac_store(dboid, tableoid, params->type, params);
+	if (!evs_enabled)
+		goto chain;
 
+	if (!evs_should_track_relation(dboid, tableoid))
+		goto chain;
+
+	store_relation = (strcmp(evs_track, "databases") != 0);
+	store_db = (strcmp(evs_track, "relations") != 0);
+
+	extvac_store(dboid, tableoid, params->type, params, store_relation, store_db);
+
+chain:
 	if (prev_report_vacuum_hook)
 		prev_report_vacuum_hook(tableoid, shared, params);
 }
@@ -203,6 +471,32 @@ _PG_init(void)
 							 "Enable extended vacuum statistics collection.",
 							 NULL, &evs_enabled, true,
 							 PGC_SUSET, 0, NULL, NULL, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.track",
+							   "What to track: 'all', 'databases', 'relations'.",
+							   NULL, &evs_track, "all",
+							   PGC_SUSET, 0, NULL, NULL, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.track_relations",
+							   "When tracking relations: 'all', 'system', 'user'.",
+							   NULL, &evs_track_relations, "all",
+							   PGC_SUSET, 0, NULL, NULL, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.track_databases",
+							   "Comma-separated database OIDs to track; empty = all.",
+							   NULL, &evs_track_databases, "",
+							   PGC_SUSET, 0, NULL, evs_assign_track_databases, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.track_relations_list",
+							   "Comma-separated relation OIDs to track; empty = all.",
+							   NULL, &evs_track_relations_list, "",
+							   PGC_SUSET, 0, NULL, evs_assign_track_relations_list, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.collect",
+							   "Space-separated list of stats to collect: buffers, wal, tuples, timing, or all.",
+							   NULL, &evs_collect, "all",
+							   PGC_SUSET, 0, NULL, evs_assign_collect, NULL);
+
 	MarkGUCPrefixReserved(SJ_NODENAME);
 
 	pgstat_register_kind(PGSTAT_KIND_EXTVAC_RELATION, &extvac_relation_kind_info);
@@ -262,6 +556,61 @@ extvac_reset_db_entry(PG_FUNCTION_ARGS)
 	Oid			dboid = PG_GETARG_OID(0);
 
 	PG_RETURN_INT64(extvac_database_reset(dboid));
+}
+
+/* --- Track OID functions (add/remove, persisted to file) --- */
+
+PG_FUNCTION_INFO_V1(evs_add_track_database);
+PG_FUNCTION_INFO_V1(evs_remove_track_database);
+PG_FUNCTION_INFO_V1(evs_add_track_relation);
+PG_FUNCTION_INFO_V1(evs_remove_track_relation);
+
+Datum
+evs_add_track_database(PG_FUNCTION_ARGS)
+{
+	Oid			oid = PG_GETARG_OID(0);
+	bool		found;
+
+	evs_track_hash_ensure_init();
+	hash_search(evs_track_databases_hash, &oid, HASH_ENTER, &found);
+	evs_track_save_file();
+	PG_RETURN_BOOL(!found);		/* true if newly added */
+}
+
+Datum
+evs_remove_track_database(PG_FUNCTION_ARGS)
+{
+	Oid			oid = PG_GETARG_OID(0);
+	bool		found;
+
+	evs_track_hash_ensure_init();
+	hash_search(evs_track_databases_hash, &oid, HASH_REMOVE, &found);
+	evs_track_save_file();
+	PG_RETURN_BOOL(found);
+}
+
+Datum
+evs_add_track_relation(PG_FUNCTION_ARGS)
+{
+	Oid			oid = PG_GETARG_OID(0);
+	bool		found;
+
+	evs_track_hash_ensure_init();
+	hash_search(evs_track_relations_hash, &oid, HASH_ENTER, &found);
+	evs_track_save_file();
+	PG_RETURN_BOOL(!found);		/* true if newly added */
+}
+
+Datum
+evs_remove_track_relation(PG_FUNCTION_ARGS)
+{
+	Oid			oid = PG_GETARG_OID(0);
+	bool		found;
+
+	evs_track_hash_ensure_init();
+	hash_search(evs_track_relations_hash, &oid, HASH_REMOVE, &found);
+	evs_track_save_file();
+	PG_RETURN_BOOL(found);
 }
 
 /* --- Output helpers --- */

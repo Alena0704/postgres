@@ -36,6 +36,27 @@ RETURNS bigint
 AS 'MODULE_PATHNAME', 'vacuum_statistics_reset'
 LANGUAGE C STRICT PARALLEL SAFE;
 
+-- Add/remove OIDs for track_databases and track_relations_list (persisted to file)
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.add_track_database(dboid oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'evs_add_track_database'
+LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.remove_track_database(dboid oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'evs_remove_track_database'
+LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.add_track_relation(reloid oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'evs_add_track_relation'
+LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.remove_track_relation(reloid oid)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'evs_remove_track_relation'
+LANGUAGE C STRICT;
+
 -- Internal C function to fetch table vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  dboid oid,
