@@ -1086,8 +1086,8 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	if (indstats->istat_updated)
 		istat = &(indstats->istat);
 
-	extvac_stats_start_idx(indrel, istat, &extVacCounters);
-
+	if (set_report_vacuum_hook)
+		extvac_stats_start_idx(indrel, istat, &extVacCounters);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
 	ivinfo.analyze_only = false;
@@ -1116,8 +1116,12 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 				 RelationGetRelationName(indrel));
 	}
 
-	memset(&extVacReport, 0, sizeof(extVacReport));
-	extvac_stats_end_idx(indrel, istat_res, &extVacCounters, &extVacReport);
+	if (set_report_vacuum_hook)
+	{
+		memset(&extVacReport, 0, sizeof(extVacReport));
+		extvac_stats_end_idx(indrel, istat_res, &extVacCounters, &extVacReport);
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, &extVacReport);
+	}
 
 	/*
 	 * Copy the index bulk-deletion result returned from ambulkdelete and
