@@ -4,7 +4,7 @@
  *    Extended vacuum statistics via hook and custom storage
  *
  * This extension collects extended vacuum statistics via set_report_vacuum_hook
- * and stores them in shared memory.  Requires shared_preload_libraries.
+ * and stores them in shared memory.
  *
  *-------------------------------------------------------------------------
  */
@@ -14,7 +14,7 @@
 CREATE SCHEMA IF NOT EXISTS ext_vacuum_statistics;
 
 COMMENT ON SCHEMA ext_vacuum_statistics IS
-  'Extended vacuum statistics (heap, index, database aggregates)';
+  'Extended vacuum statistics (heap, index, database)';
 
 -- Reset functions
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.extvac_reset_entry(
@@ -36,7 +36,7 @@ RETURNS bigint
 AS 'MODULE_PATHNAME', 'vacuum_statistics_reset'
 LANGUAGE C STRICT PARALLEL SAFE;
 
--- Add/remove OIDs for track_databases and track_relations_list (persisted to file)
+-- Add/remove OIDs for tracking
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.add_track_database(dboid oid)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'evs_add_track_database'
@@ -47,15 +47,23 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'evs_remove_track_database'
 LANGUAGE C STRICT;
 
-CREATE OR REPLACE FUNCTION ext_vacuum_statistics.add_track_relation(reloid oid)
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.add_track_relation(dboid oid, reloid oid)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'evs_add_track_relation'
 LANGUAGE C STRICT;
 
-CREATE OR REPLACE FUNCTION ext_vacuum_statistics.remove_track_relation(reloid oid)
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.remove_track_relation(dboid oid, reloid oid)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'evs_remove_track_relation'
 LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.track_list()
+RETURNS TABLE(track_kind text, dboid oid, reloid oid)
+AS 'MODULE_PATHNAME', 'evs_track_list'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION ext_vacuum_statistics.track_list() IS
+  'List of database and relation OIDs for which vacuum statistics are collected.';
 
 -- Internal C function to fetch table vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(

@@ -629,8 +629,49 @@ $base_stats = $node->safe_psql(
 is($base_stats, 0, 'vacuum stats per all index objects from another database are not available as expected');
 };
 
+#--------------------------------------------------------------------------------------
+# Test 9: Check database-level vacuum statistics from the current and another database
+#--------------------------------------------------------------------------------------
+subtest 'Test 9: Check database-level vacuum statistics from the current and another database' => sub
+{
+my $db_blk_hit = 0;
+my $total_blks_dirtied = 0;
+my $total_blks_written = 0;
+my $wal_records = 0;
+my $wal_fpi = 0;
+my $wal_bytes = 0;
+$base_stats = $node->safe_psql(
+    $dbname,
+    "SELECT db_blks_hit, db_blks_dirtied,
+            db_blks_written, db_wal_records,
+            db_wal_fpi, db_wal_bytes
+     FROM ext_vacuum_statistics.pg_stats_vacuum_database, pg_database
+     WHERE pg_database.datname = '$dbname'
+            AND pg_database.oid = ext_vacuum_statistics.pg_stats_vacuum_database.dboid;"
+);
+$base_stats =~ s/\s*\|\s*/ /g;   # transform " | " into space
+    ($db_blk_hit, $total_blks_dirtied, $total_blks_written, $wal_records, $wal_fpi, $wal_bytes)
+        = split /\s+/, $base_stats;
+
+ok($db_blk_hit > 0, 'db_blks_hit is more than 0');
+ok($total_blks_dirtied > 0, 'total_blks_dirtied is more than 0');
+ok($total_blks_written > 0, 'total_blks_written is more than 0');
+ok($wal_records > 0, 'wal_records is more than 0');
+ok($wal_fpi > 0, 'wal_fpi is more than 0');
+ok($wal_bytes > 0, 'wal_bytes is more than 0');
+
+$base_stats = $node->safe_psql(
+    'postgres',
+    "SELECT count(*) = 1
+     FROM ext_vacuum_statistics.pg_stats_vacuum_database, pg_database
+     WHERE pg_database.datname = '$dbname'
+            AND pg_database.oid = ext_vacuum_statistics.pg_stats_vacuum_database.dboid;"
+);
+ok($base_stats eq 't', 'check database-level vacuum stats from another database are available');
+};
+
 #------------------------------------------------------------------------------
-# Test 9: Cleanup checks: ensure functions return empty sets for OID = 0
+# Test 10: Cleanup checks: ensure functions return empty sets for OID = 0
 #------------------------------------------------------------------------------
 subtest 'Test 10: Cleanup checks: ensure functions return empty sets for OID = 0' => sub
 {

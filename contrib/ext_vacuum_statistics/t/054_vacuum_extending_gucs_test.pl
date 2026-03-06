@@ -4,9 +4,8 @@
 #   vacuum_statistics.enabled
 #   vacuum_statistics.track (all, databases, relations)
 #   vacuum_statistics.track_relations (all, system, user)
-#   vacuum_statistics.track_databases
-#   vacuum_statistics.track_relations_list
-#   vacuum_statistics.collect (space-separated: buffers, wal, tuples, timing, all)
+#   add/remove_track_database, add/remove_track_relation, track_*_from_list
+#   vacuum_statistics.collect (space-separated: buffers, wal, general, timing, all)
 
 use strict;
 use warnings;
@@ -51,8 +50,7 @@ my $dboid = $node->safe_psql($dbname, q{SELECT oid FROM pg_database WHERE datnam
 my $reloid = $node->safe_psql($dbname, q{SELECT oid FROM pg_class WHERE relname = 'guc_test'});
 
 #------------------------------------------------------------------------------
-# Helper: reset stats and run vacuum (all in one session so GUCs persist)
-# Optional $opts is hash with keys: gucs (array of "name=value"), table
+# Reset stats and run vacuum (all in one session so GUCs persist)
 #------------------------------------------------------------------------------
 
 sub reset_and_vacuum {
@@ -61,8 +59,7 @@ sub reset_and_vacuum {
     my $gucs = $opts && $opts->{gucs} ? $opts->{gucs} : [];
     my $sql = join("\n", (map { "SET $_;" } @$gucs),
         "SELECT ext_vacuum_statistics.vacuum_statistics_reset();",
-        "VACUUM $table;",
-        "SELECT pg_stat_force_next_flush();");
+        "VACUUM $table;");
     $node->safe_psql($db, $sql);
     sleep(0.1);
 }
@@ -76,7 +73,7 @@ subtest 'vacuum_statistics.enabled' => sub {
     # Default: enabled - should have stats
     my $count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    ok($count > 0, 'stats collected when enabled (default)');
+    ok($count > 0, 'stats collected when enabled');
 
     # Disable, reset and vacuum in same session
     reset_and_vacuum($dbname, 'guc_test', { gucs => ['vacuum_statistics.enabled = off'] });
@@ -90,50 +87,50 @@ subtest 'vacuum_statistics.enabled' => sub {
 # Test 2: vacuum_statistics.track (databases only, relations only)
 #------------------------------------------------------------------------------
 subtest 'vacuum_statistics.track' => sub {
-    # Run vacuum and checks in same session so stats are visible.
-    # Create dead tuples so vacuum does work and produces stats.
-    $node->safe_psql($dbname, q{ DELETE FROM guc_test WHERE x % 2 = 0; });
-    my $result = $node->safe_psql($dbname, qq{
+    # track only db stats, no relation stats
+    my $r1 = $node->safe_psql($dbname, qq{
         SET vacuum_statistics.track = 'databases';
         SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+        TRUNCATE guc_test;
+        INSERT INTO guc_test SELECT x FROM generate_series(1, 100) AS g(x);
+        DELETE FROM guc_test;
         VACUUM guc_test;
-        SELECT pg_stat_force_next_flush();
-        SELECT
-            (SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test') AS rel_cnt,
-            (SELECT COALESCE(db_blks_read, 0) > 0 FROM ext_vacuum_statistics.pg_stats_vacuum_database WHERE dboid = $dboid) AS db_has;
     });
-    $result =~ s/\s*\|\s*/ /g;
-    my ($rel_count, $db_has_stats) = split /\s+/, $result;
-    is($rel_count, 0, 'track=databases: no relation stats');
-    is($db_has_stats, 't', 'track=databases: database stats collected');
+    my $db_has_dbs = $node->safe_psql($dbname,
+                                   "SELECT COALESCE(SUM(db_blks_hit), 0) FROM ext_vacuum_statistics.pg_stats_vacuum_database WHERE dboid = $dboid");
+    my $rel_dbs = $node->safe_psql($dbname,
+                                "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
+    is($rel_dbs, 0, 'track=databases: no relation stats');
+    ok($db_has_dbs > 0, 'track=databases: database stats collected');
 
-    $result = $node->safe_psql($dbname, qq{
+    # track only relation stats, no db stats
+    my $r2 = $node->safe_psql($dbname, qq{
         SET vacuum_statistics.track = 'relations';
         SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+        TRUNCATE guc_test;
+        INSERT INTO guc_test SELECT x FROM generate_series(1, 100) AS g(x);
+        DELETE FROM guc_test;
         VACUUM guc_test;
-        SELECT pg_stat_force_next_flush();
-        SELECT
-            (SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test') AS rel_cnt,
-            (SELECT COALESCE(db_blks_read, 0) > 0 FROM ext_vacuum_statistics.pg_stats_vacuum_database WHERE dboid = $dboid) AS db_has;
     });
-    $result =~ s/\s*\|\s*/ /g;
-    ($rel_count, my $db_has_stats_rel) = split /\s+/, $result;
-    ok($rel_count > 0, 'track=relations: relation stats collected');
-    is($db_has_stats_rel, 'f', 'track=relations: no database stats');
+    my $db_has_rels = $node->safe_psql($dbname,
+                                   "SELECT COALESCE(SUM(db_blks_hit), 0) > 0 FROM ext_vacuum_statistics.pg_stats_vacuum_database WHERE dboid = $dboid");
+    my $rel_rels = $node->safe_psql($dbname,
+                                "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
+    ok($rel_rels > 0, 'track=relations: relation stats collected');
+    is($db_has_rels, 'f', 'track=relations: no database stats');
 };
 
 #------------------------------------------------------------------------------
 # Test 3: vacuum_statistics.track_relations (system, user)
 #------------------------------------------------------------------------------
 subtest 'vacuum_statistics.track_relations' => sub {
-    # track_relations = 'user' - only user tables
+    # track_relations - only user tables
     $node->safe_psql($dbname, qq{
         SET vacuum_statistics.track = 'relations';
         SET vacuum_statistics.track_relations = 'user';
         SELECT ext_vacuum_statistics.vacuum_statistics_reset();
         VACUUM guc_test;
         VACUUM pg_class;
-        SELECT pg_stat_force_next_flush();
     });
     sleep(0.1);
 
@@ -144,14 +141,13 @@ subtest 'vacuum_statistics.track_relations' => sub {
     ok($user_rel > 0, 'track_relations=user: user table stats collected');
     is($sys_rel, 0, 'track_relations=user: system table stats not collected');
 
-    # track_relations = 'system' - only system tables
+    # track_relations - only system tables
     $node->safe_psql($dbname, qq{
         SET vacuum_statistics.track = 'relations';
         SET vacuum_statistics.track_relations = 'system';
         SELECT ext_vacuum_statistics.vacuum_statistics_reset();
         VACUUM guc_test;
         VACUUM pg_class;
-        SELECT pg_stat_force_next_flush();
     });
     sleep(0.1);
 
@@ -164,41 +160,53 @@ subtest 'vacuum_statistics.track_relations' => sub {
 };
 
 #------------------------------------------------------------------------------
-# Test 4: vacuum_statistics.track_databases (OID filter)
+# Test 4: track_databases (via add/remove_track_database)
 #------------------------------------------------------------------------------
-subtest 'vacuum_statistics.track_databases' => sub {
-    # Filter to a different DB OID - should collect nothing for current db
-    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_databases = '1'"] });
+subtest 'track_databases (add/remove)' => sub {
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.remove_track_database($dboid)");
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.add_track_database(1)");
+    my $track = $node->safe_psql($dbname, "SELECT track_kind, count(*) FROM ext_vacuum_statistics.track_list() GROUP BY track_kind");
+    like($track, qr/database\s*\|\s*1/, 'track_list: 1 database after add_track_database(1)');
+    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_databases_from_list = on"] });
 
     my $rel_count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    is($rel_count, 0, 'track_databases=1: no stats for other database');
+    is($rel_count, 0, 'only db 1 in list: no stats for current db');
 
-    # Filter to current DB OID
-    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_databases = '$dboid'"] });
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.remove_track_database(1)");
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.add_track_database($dboid)");
+    $track = $node->safe_psql($dbname, "SELECT track_kind, count(*) FROM ext_vacuum_statistics.track_list() GROUP BY track_kind");
+    like($track, qr/database\s*\|\s*1/, 'track_list: 1 database after add_track_database(dboid)');
+    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_databases_from_list = on"] });
 
     $rel_count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    ok($rel_count > 0, 'track_databases=current: stats collected');
+    ok($rel_count > 0, 'current db in list: stats collected');
 };
 
 #------------------------------------------------------------------------------
-# Test 5: vacuum_statistics.track_relations_list (OID filter)
+# Test 5: track_relations (via add/remove_track_relation)
 #------------------------------------------------------------------------------
-subtest 'vacuum_statistics.track_relations_list' => sub {
-    # Filter to a non-existent relation OID
-    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_relations_list = '99999'"] });
+subtest 'track_relations (add/remove)' => sub {
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.remove_track_relation($dboid, $reloid)");
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.add_track_relation(0, 99999)");  # rel 99999, any db
+    my $track = $node->safe_psql($dbname, "SELECT track_kind, count(*) FROM ext_vacuum_statistics.track_list() GROUP BY track_kind");
+    like($track, qr/relation\s*\|\s*1/, 'track_list: 1 relation after add_track_relation(0, 99999)');
+    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_relations_from_list = on"] });
 
     my $rel_count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    is($rel_count, 0, 'track_relations_list=99999: no stats for excluded relation');
+    is($rel_count, 0, 'only rel 99999 in list: no stats for guc_test');
 
-    # Filter to current table OID
-    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_relations_list = '$reloid'"] });
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.remove_track_relation(0, 99999)");
+    $node->safe_psql($dbname, "SELECT ext_vacuum_statistics.add_track_relation($dboid, $reloid)");
+    $track = $node->safe_psql($dbname, "SELECT track_kind, count(*) FROM ext_vacuum_statistics.track_list() GROUP BY track_kind");
+    like($track, qr/relation\s*\|\s*1/, 'track_list: 1 relation after add_track_relation(dboid, reloid)');
+    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.track_relations_from_list = on"] });
 
     $rel_count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    ok($rel_count > 0, 'track_relations_list=reloid: stats collected for table');
+    ok($rel_count > 0, 'current table in list: stats collected');
 };
 
 #------------------------------------------------------------------------------
@@ -239,8 +247,8 @@ subtest 'vacuum_statistics.collect_mask' => sub {
     is($tup, 0, 'collect=wal: tuples_deleted zeroed');
     is($dly, 0, 'collect=wal: delay_time zeroed');
 
-    # collect = wal tuples timing: all except buffers
-    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.collect = 'wal tuples timing'"] });
+    # collect = wal general timing: all except buffers
+    reset_and_vacuum($dbname, 'guc_test', { gucs => ["vacuum_statistics.collect = 'wal general timing'"] });
 
     $row = $node->safe_psql($dbname,
         "SELECT total_blks_read, total_blks_hit, blk_read_time, blk_write_time
@@ -251,10 +259,10 @@ subtest 'vacuum_statistics.collect_mask' => sub {
     $r2 =~ s/\s//g;
     $r3 =~ s/\s//g;
     $r4 =~ s/\s//g;
-    is($r1, 0, 'collect=wal tuples timing: total_blks_read zeroed');
-    is($r2, 0, 'collect=wal tuples timing: total_blks_hit zeroed');
-    is($r3, 0, 'collect=wal tuples timing: blk_read_time zeroed');
-    is($r4, 0, 'collect=wal tuples timing: blk_write_time zeroed');
+    is($r1, 0, 'collect=wal general timing: total_blks_read zeroed');
+    is($r2, 0, 'collect=wal general timing: total_blks_hit zeroed');
+    is($r3, 0, 'collect=wal general timing: blk_read_time zeroed');
+    is($r4, 0, 'collect=wal general timing: blk_write_time zeroed');
 };
 
 $node->stop;

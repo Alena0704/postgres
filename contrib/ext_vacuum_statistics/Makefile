@@ -10,7 +10,7 @@ ISOLATION = vacuum-extending-in-repetable-read
 ISOLATION_OPTS = --temp-config=$(top_srcdir)/contrib/ext_vacuum_statistics/ext_vacuum_statistics.conf
 TAP_TESTS = 1
 
-# Tests require v27 vacuum statistics patch applied to PostgreSQL
+# Tests require vacuum statistics patch
 NO_INSTALLCHECK = 1
 
 ifdef USE_PGXS
