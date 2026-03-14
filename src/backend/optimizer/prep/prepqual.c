@@ -31,6 +31,7 @@
 
 #include "postgres.h"
 
+#include "access/cmptype.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -41,6 +42,7 @@ static List *pull_ands(List *andlist);
 static List *pull_ors(List *orlist);
 static Expr *find_duplicate_ors(Expr *qual, bool is_check);
 static Expr *process_duplicate_ors(List *orlist);
+static Expr *try_make_row_compare_from_or(List *orlist);
 
 
 /*
@@ -506,6 +508,135 @@ find_duplicate_ors(Expr *qual, bool is_check)
 }
 
 /*
+ * try_make_row_compare_from_or
+ *	  Transform "x1 > x2 OR (x1 = x2 AND y1 > y2)" into "(x1, y1) > (x2, y2)".
+ *	  Similarly for <.
+ *
+ * Returns the RowCompareExpr if the pattern matches, otherwise NULL.
+ */
+static Expr *
+try_make_row_compare_from_or(List *orlist)
+{
+	Expr	   *op_clause = NULL;
+	Expr	   *and_clause = NULL;
+	OpExpr	   *op1;
+	BoolExpr   *andexpr;
+	OpExpr	   *eq_op;
+	OpExpr	   *op2;
+	CompareType cmptype;
+	Oid			opfamily1,
+				opfamily2;
+	Node	   *x1, *x2, *y1, *y2;
+	List	   *opfamilies;
+	List	   *opnos;
+	List	   *inputcollids;
+	RowCompareExpr *rcexpr;
+
+	if (list_length(orlist) != 2)
+		return NULL;
+
+	/* Identify which clause is OpExpr and which is AND */
+	if (IsA(linitial(orlist), OpExpr) && is_andclause(lsecond(orlist)))
+	{
+		op_clause = (Expr *) linitial(orlist);
+		and_clause = (Expr *) lsecond(orlist);
+	}
+	else if (is_andclause(linitial(orlist)) && IsA(lsecond(orlist), OpExpr))
+	{
+		and_clause = (Expr *) linitial(orlist);
+		op_clause = (Expr *) lsecond(orlist);
+	}
+	else
+		return NULL;
+
+	op1 = (OpExpr *) op_clause;
+	andexpr = (BoolExpr *) and_clause;
+
+	if (list_length(andexpr->args) != 2)
+		return NULL;
+
+	/* AND must contain one equality and one comparison; order may vary */
+	if (!IsA(linitial(andexpr->args), OpExpr) || !IsA(lsecond(andexpr->args), OpExpr))
+		return NULL;
+
+	if (get_mergejoin_opfamilies(((OpExpr *) linitial(andexpr->args))->opno) != NIL)
+	{
+		eq_op = (OpExpr *) linitial(andexpr->args);
+		op2 = (OpExpr *) lsecond(andexpr->args);
+	}
+	else if (get_mergejoin_opfamilies(((OpExpr *) lsecond(andexpr->args))->opno) != NIL)
+	{
+		eq_op = (OpExpr *) lsecond(andexpr->args);
+		op2 = (OpExpr *) linitial(andexpr->args);
+	}
+	else
+		return NULL;
+
+	/* oonly for > or <, and use same comparison direction */
+	{
+		CompareType cmptype1,
+					cmptype2;
+		Oid			opcintype1,
+					opcintype2;
+		List	   *eq_opfamilies;
+
+		if (!get_ordering_op_properties(op1->opno, &opfamily1, &opcintype1, &cmptype1))
+			return NULL;
+		if (cmptype1 != COMPARE_GT && cmptype1 != COMPARE_LT)
+			return NULL;
+
+		if (!get_ordering_op_properties(op2->opno, &opfamily2, &opcintype2, &cmptype2))
+			return NULL;
+		if (cmptype2 != COMPARE_GT && cmptype2 != COMPARE_LT)
+			return NULL;
+
+		if (cmptype1 != cmptype2)
+			return NULL;
+
+		/* Equality op must be in same opfamily as op1 for valid row comparison */
+		eq_opfamilies = get_mergejoin_opfamilies(eq_op->opno);
+		if (!list_member_oid(eq_opfamilies, opfamily1))
+			return NULL;
+
+		cmptype = cmptype1;
+	}
+
+	/* Extract args: op1 is x1 op x2, eq_op is x1 = x2, op2 is y1 op y2 */
+	x1 = (Node *) linitial(op1->args);
+	x2 = (Node *) lsecond(op1->args);
+	if (!((equal(x1, linitial(eq_op->args)) && equal(x2, lsecond(eq_op->args))) ||
+		  (equal(x1, lsecond(eq_op->args)) && equal(x2, linitial(eq_op->args)))))
+		return NULL;
+
+	y1 = (Node *) linitial(op2->args);
+	y2 = (Node *) lsecond(op2->args);
+
+	/*
+	 * Only transform when all four args are Var or Const.
+	 */
+	if (!(IsA(x1, Var) || IsA(x1, Const)) ||
+		!(IsA(x2, Var) || IsA(x2, Const)) ||
+		!(IsA(y1, Var) || IsA(y1, Const)) ||
+		!(IsA(y2, Var) || IsA(y2, Const)))
+		return NULL;
+
+	/* Build RowCompareExpr */
+	opnos = list_make2_oid(op1->opno, op2->opno);
+	opfamilies = list_make2_oid(opfamily1, opfamily2);
+	inputcollids = list_make2_oid(op1->inputcollid, op2->inputcollid);
+
+	rcexpr = makeNode(RowCompareExpr);
+	rcexpr->cmptype = cmptype;
+	rcexpr->opnos = opnos;
+	rcexpr->opfamilies = opfamilies;
+	rcexpr->inputcollids = inputcollids;
+	rcexpr->largs = list_make2(copyObject(x1), copyObject(y1));
+	rcexpr->rargs = list_make2(copyObject(x2), copyObject(y2));
+
+	return (Expr *) rcexpr;
+}
+
+/*
  * process_duplicate_ors
  *	  Given a list of exprs which are ORed together, try to apply
  *	  the inverse OR distributive law.
@@ -516,6 +647,7 @@ find_duplicate_ors(Expr *qual, bool is_check)
 static Expr *
 process_duplicate_ors(List *orlist)
 {
+	Expr	   *row_compare;
 	List	   *reference = NIL;
 	int			num_subclauses = 0;
 	List	   *winners;
@@ -529,6 +661,13 @@ process_duplicate_ors(List *orlist)
 	/* Single-expression OR just reduces to that expression */
 	if (list_length(orlist) == 1)
 		return (Expr *) linitial(orlist);
+
+	/*
+	 * Try to transform "x1 > x2 OR (x1 = x2 AND y1 > y2)" into (x1,y1) > (x2,y2).
+	 */
+	row_compare = try_make_row_compare_from_or(orlist);
+	if (row_compare != NULL)
+		return row_compare;
 
 	/*
 	 * Choose the shortest AND clause as the reference list --- obviously, any

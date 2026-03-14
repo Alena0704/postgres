@@ -162,6 +162,40 @@ select thousand, hundred from tenk1
 where (998, 5000) < (thousand, hundred)
 order by thousand, hundred;
 
+--
+-- Test transformation of "x1 > x2 OR (x1 = x2 AND y1 > y2)" into (x1,y1) > (x2,y2)
+--
+select thousand, tenthous from tenk1
+where thousand > 997 or (thousand = 997 and tenthous > 5000)
+order by thousand, tenthous;
+
+select thousand, tenthous from tenk1
+where (thousand, tenthous) > (997, 5000)
+order by thousand, tenthous;
+
+-- Same result with reversed OR order: (a=x AND b>y) OR a>x
+select thousand, tenthous from tenk1
+where (thousand = 997 and tenthous > 5000) or thousand > 997
+order by thousand, tenthous;
+
+create temp table row_compare_lt (x int, y int);
+insert into row_compare_lt values (1,1), (1,2), (2,1), (2,2);
+select * from row_compare_lt where x < 2 or (x = 2 and y < 2) order by x, y;
+select * from row_compare_lt where (x, y) < (2, 2) order by x, y;
+drop table row_compare_lt;
+
+-- EXPLAIN: transformed qual should show RowCompare
+explain (costs off)
+select thousand, tenthous from tenk1
+where thousand > 997 or (thousand = 997 and tenthous > 5000);
+
+-- Test with different column types (int, text)
+create temp table row_compare_tab (a int, b text);
+insert into row_compare_tab values (1,'a'), (1,'b'), (2,'a'), (2,'b');
+select * from row_compare_tab where a > 1 or (a = 1 and b > 'a');
+select * from row_compare_tab where (a, b) > (1, 'a');
+drop table row_compare_tab;
+
 -- Test case for bug #14010: indexed row comparisons fail with nulls
 create temp table test_table (a text, b text);
 insert into test_table values ('a', 'b');
