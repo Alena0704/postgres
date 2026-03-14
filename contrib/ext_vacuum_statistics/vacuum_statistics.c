@@ -17,7 +17,6 @@
  #include "funcapi.h"
  #include "miscadmin.h"
  #include "pgstat.h"
- #include "port/pg_bitutils.h"
  #include "storage/fd.h"
  #include "utils/builtins.h"
  #include "utils/fmgrprotos.h"
@@ -31,9 +30,15 @@
  PG_MODULE_MAGIC;
  #endif
 
- /* Two kinds: relations (tables/indexes) and database aggregates */
- #define PGSTAT_KIND_EXTVAC_RELATION	24
- #define PGSTAT_KIND_EXTVAC_DB		25
+ /* Kind IDs for split stats (buffers, wal, general, timing) - per relation and per db */
+ #define PGSTAT_KIND_EXTVAC_REL_BUF	24
+ #define PGSTAT_KIND_EXTVAC_REL_WAL	25
+ #define PGSTAT_KIND_EXTVAC_REL_GEN	26
+ #define PGSTAT_KIND_EXTVAC_REL_TIM	27
+ #define PGSTAT_KIND_EXTVAC_DB_BUF	28
+ #define PGSTAT_KIND_EXTVAC_DB_WAL	29
+ #define PGSTAT_KIND_EXTVAC_DB_GEN	30
+ #define PGSTAT_KIND_EXTVAC_DB_TIM	31
 
  #define SJ_NODENAME		"vacuum_statistics"
  #define EVS_TRACK_FILENAME	"pg_stat/ext_vacuum_statistics_track.oid"
@@ -103,7 +108,7 @@
 	 Oid			reloid;
  }			EvsTrackRelKey;
 
- /* Stats structs - packed in data blob in order: BUF, WAL, GEN, TIM (only enabled) */
+ /* Minimal stats structs - allocated only for enabled categories */
  typedef struct EvsBuffersStats
  {
 	 int64		total_blks_read;
@@ -157,80 +162,114 @@
 	 }			u;
  }			EvsGeneralStats;
 
- /* Flexible entry: header + data blob. Size set at init from vacuum_statistics.collect GUC. */
- typedef struct PgStatShared_ExtVacEntry
+ typedef struct PgStatShared_ExtVacBuffers
  {
 	 PgStatShared_Common header;
-	 char		data[1];		/* flexible, length = evs_shared_data_len */
- }			PgStatShared_ExtVacEntry;
+	 EvsBuffersStats stats;
+ }			PgStatShared_ExtVacBuffers;
 
- /* Category order and sizes for layout; index = pg_rightmost_one_pos32(cat) */
- #define EVS_NCAT		4
- #define EVS_CAT_MASKS	{ EVS_COLLECT_BUFFERS, EVS_COLLECT_WAL, EVS_COLLECT_GENERAL, EVS_COLLECT_TIMING }
- #define EVS_CAT_SIZES	{ sizeof(EvsBuffersStats), sizeof(EvsWalStats), sizeof(EvsGeneralStats), sizeof(EvsTimingStats) }
- #define EVS_CAT_IDX(cat)	(pg_rightmost_one_pos32((uint32)(cat)))
-
- static const int evs_cat_mask[EVS_NCAT] = EVS_CAT_MASKS;
- static const uint32 evs_cat_size[EVS_NCAT] = EVS_CAT_SIZES;
-
- /* Layout: offsets per category (index by bit), total length; computed at init. */
- static uint32 evs_shared_data_len;
- static uint32 evs_off[EVS_NCAT];
-
- static void
- evs_compute_layout(int mask)
+ typedef struct PgStatShared_ExtVacWal
  {
-	 uint32		off = 0;
+	 PgStatShared_Common header;
+	 EvsWalStats stats;
+ }			PgStatShared_ExtVacWal;
 
-	 if (mask == 0)
-		 mask = EVS_COLLECT_ALL;
-
-	 for (int i = 0; i < EVS_NCAT; i++)
-	 {
-		 if (mask & evs_cat_mask[i])
-		 {
-			 evs_off[i] = off;
-			 off += evs_cat_size[i];
-		 }
-	 }
-	 evs_shared_data_len = off;
- }
-
- static uint32
- evs_entry_shared_size(void)
+ typedef struct PgStatShared_ExtVacTiming
  {
-	 return offsetof(PgStatShared_ExtVacEntry, data) + evs_shared_data_len;
- }
+	 PgStatShared_Common header;
+	 EvsTimingStats stats;
+ }			PgStatShared_ExtVacTiming;
 
- #define EVS_ACCUM(dst, src, field, cat) \
-	 do { if (evs_collect_mask & (cat)) (dst)->field += (src)->field; } while (0)
+ typedef struct PgStatShared_ExtVacGeneral
+ {
+	 PgStatShared_Common header;
+	 EvsGeneralStats stats;
+ }			PgStatShared_ExtVacGeneral;
 
+ static const PgStat_KindInfo extvac_rel_buf_info = {
+	 .name = "ext_vacuum_stats_rel_buf", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacBuffers),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacBuffers, stats),
+	 .shared_data_len = sizeof(EvsBuffersStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_rel_wal_info = {
+	 .name = "ext_vacuum_stats_rel_wal", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacWal),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacWal, stats),
+	 .shared_data_len = sizeof(EvsWalStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_rel_gen_info = {
+	 .name = "ext_vacuum_stats_rel_gen", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacGeneral),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacGeneral, stats),
+	 .shared_data_len = sizeof(EvsGeneralStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_rel_tim_info = {
+	 .name = "ext_vacuum_stats_rel_tim", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacTiming),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacTiming, stats),
+	 .shared_data_len = sizeof(EvsTimingStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_db_buf_info = {
+	 .name = "ext_vacuum_stats_db_buf", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacBuffers),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacBuffers, stats),
+	 .shared_data_len = sizeof(EvsBuffersStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_db_wal_info = {
+	 .name = "ext_vacuum_stats_db_wal", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacWal),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacWal, stats),
+	 .shared_data_len = sizeof(EvsWalStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_db_gen_info = {
+	 .name = "ext_vacuum_stats_db_gen", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacGeneral),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacGeneral, stats),
+	 .shared_data_len = sizeof(EvsGeneralStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+ static const PgStat_KindInfo extvac_db_tim_info = {
+	 .name = "ext_vacuum_stats_db_tim", .fixed_amount = false,
+	 .accessed_across_databases = true, .write_to_file = true, .track_entry_count = true,
+	 .shared_size = sizeof(PgStatShared_ExtVacTiming),
+	 .shared_data_off = offsetof(PgStatShared_ExtVacTiming, stats),
+	 .shared_data_len = sizeof(EvsTimingStats), .pending_size = 0, .flush_pending_cb = NULL
+ };
+
+ /* Accumulate params into split stats - only for enabled mask bits */
  static inline void
  evs_accum_buffers(EvsBuffersStats *dst, const PgStat_CommonCounts *src)
  {
-	 EVS_ACCUM(dst, src, total_blks_read, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, total_blks_hit, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, total_blks_dirtied, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, total_blks_written, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, blks_fetched, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, blks_hit, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, blk_read_time, EVS_COLLECT_BUFFERS);
-	 EVS_ACCUM(dst, src, blk_write_time, EVS_COLLECT_BUFFERS);
+	 dst->total_blks_read += src->total_blks_read;
+	 dst->total_blks_hit += src->total_blks_hit;
+	 dst->total_blks_dirtied += src->total_blks_dirtied;
+	 dst->total_blks_written += src->total_blks_written;
+	 dst->blks_fetched += src->blks_fetched;
+	 dst->blks_hit += src->blks_hit;
+	 dst->blk_read_time += src->blk_read_time;
+	 dst->blk_write_time += src->blk_write_time;
  }
 
  static inline void
  evs_accum_wal(EvsWalStats *dst, const PgStat_CommonCounts *src)
  {
-	 EVS_ACCUM(dst, src, wal_records, EVS_COLLECT_WAL);
-	 EVS_ACCUM(dst, src, wal_fpi, EVS_COLLECT_WAL);
-	 EVS_ACCUM(dst, src, wal_bytes, EVS_COLLECT_WAL);
+	 dst->wal_records += src->wal_records;
+	 dst->wal_fpi += src->wal_fpi;
+	 dst->wal_bytes += src->wal_bytes;
  }
 
  static inline void
  evs_accum_timing(EvsTimingStats *dst, const PgStat_CommonCounts *src)
  {
-	 EVS_ACCUM(dst, src, delay_time, EVS_COLLECT_TIMING);
-	 EVS_ACCUM(dst, src, total_time, EVS_COLLECT_TIMING);
+	 dst->delay_time += src->delay_time;
+	 dst->total_time += src->total_time;
  }
 
  static inline void
@@ -269,10 +308,24 @@
 	 dst->tuples_deleted += src->tuples_deleted;
  }
 
+ /* Callback for pgstat_drop_matching_entries: drop entries of given kind */
+ static bool
+ match_extvac_kind(PgStatShared_HashEntry *entry, Datum match_data)
+ {
+	 return entry->key.kind == (PgStat_Kind) DatumGetInt32(match_data);
+ }
+
+ static void
+ evs_drop_entries_for_kind(PgStat_Kind kind)
+ {
+	 pgstat_drop_matching_entries(match_extvac_kind, Int32GetDatum((int) kind));
+ }
+
  static void
  evs_assign_collect_mask(const char *newval, void *extra)
  {
 	 int			mask = 0;
+	 int			old_mask = evs_collect_mask;
 	 char	   *copy;
 	 char	   *p;
 	 char	   *tok;
@@ -304,8 +357,32 @@
 		 mask = (mask != 0) ? mask : EVS_COLLECT_ALL;
 	 }
 
+	 /* When mask shrinks: drop entries for disabled categories to free memory */
+	 if ((old_mask & ~mask) != 0)
+	 {
+		 if (old_mask & EVS_COLLECT_BUFFERS && !(mask & EVS_COLLECT_BUFFERS))
+		 {
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_REL_BUF);
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_DB_BUF);
+		 }
+		 if (old_mask & EVS_COLLECT_WAL && !(mask & EVS_COLLECT_WAL))
+		 {
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_REL_WAL);
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_DB_WAL);
+		 }
+		 if (old_mask & EVS_COLLECT_GENERAL && !(mask & EVS_COLLECT_GENERAL))
+		 {
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_REL_GEN);
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_DB_GEN);
+		 }
+		 if (old_mask & EVS_COLLECT_TIMING && !(mask & EVS_COLLECT_TIMING))
+		 {
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_REL_TIM);
+			 evs_drop_entries_for_kind(PGSTAT_KIND_EXTVAC_DB_TIM);
+		 }
+	 }
+
 	 evs_collect_mask = mask;
-	 evs_compute_layout(mask);
  }
 
  /* GUC assign hooks: parse string and update bit flags */
@@ -366,43 +443,20 @@
 							  PGC_SUSET, 0, NULL, NULL, NULL);
 
 	 DefineCustomStringVariable("vacuum_statistics.collect",
-								"Space-separated list of stats to collect: buffers, wal, general, timing, or all. Requires restart to change entry size.",
+								"Space-separated list of stats to collect: buffers, wal, general, timing, or all.",
 								NULL, &evs_collect, "all",
 								PGC_SUSET, 0, NULL, evs_assign_collect_mask, NULL);
 
 	 MarkGUCPrefixReserved(SJ_NODENAME);
 
-	 /* GUC assign hook has run; evs_collect_mask and layout are set. */
-	 evs_compute_layout(evs_collect_mask);
-
-	 {
-		 PgStat_KindInfo rel_info = {
-			 .name = "ext_vacuum_statistics_relation",
-			 .fixed_amount = false,
-			 .accessed_across_databases = true,
-			 .write_to_file = true,
-			 .track_entry_count = true,
-			 .shared_size = evs_entry_shared_size(),
-			 .shared_data_off = offsetof(PgStatShared_ExtVacEntry, data),
-			 .shared_data_len = evs_shared_data_len,
-			 .pending_size = 0,
-			 .flush_pending_cb = NULL,
-		 };
-		 PgStat_KindInfo db_info = {
-			 .name = "ext_vacuum_statistics_db",
-			 .fixed_amount = false,
-			 .accessed_across_databases = true,
-			 .write_to_file = true,
-			 .track_entry_count = true,
-			 .shared_size = evs_entry_shared_size(),
-			 .shared_data_off = offsetof(PgStatShared_ExtVacEntry, data),
-			 .shared_data_len = evs_shared_data_len,
-			 .pending_size = 0,
-			 .flush_pending_cb = NULL,
-		 };
-		 pgstat_register_kind(PGSTAT_KIND_EXTVAC_RELATION, &rel_info);
-		 pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB, &db_info);
-	 }
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_REL_BUF, &extvac_rel_buf_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_REL_WAL, &extvac_rel_wal_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_REL_GEN, &extvac_rel_gen_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_REL_TIM, &extvac_rel_tim_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB_BUF, &extvac_db_buf_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB_WAL, &extvac_db_wal_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB_GEN, &extvac_db_gen_info);
+	 pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB_TIM, &extvac_db_tim_info);
 
 	 prev_report_vacuum_hook = set_report_vacuum_hook;
 	 set_report_vacuum_hook = pgstat_report_vacuum_extstats;
@@ -657,9 +711,8 @@
 
  /*
   * Store incoming vacuum stats into pgstat custom statistics.
-  * store_relation: create/update per-relation entry
-  * store_db: accumulate into database-level entry (dboid, objid=0).
-  * Uses pgstat_get_entry_ref_locked and pgstat_accumulate_* for atomic updates.
+  * Only creates/updates entries for categories enabled in evs_collect_mask.
+  * store_relation: per-relation; store_db: database-level aggregate.
   */
  static void
  extvac_store(Oid dboid, Oid relid, int type,
@@ -667,8 +720,6 @@
 			  bool store_relation, bool store_db)
  {
 	 PgStat_EntryRef *entry_ref;
-	 PgStatShared_ExtVacEntry *shared;
-	 char	   *data;
 	 uint64		objid = EXTVAC_OBJID(relid, type);
 
 	 if (!evs_enabled)
@@ -676,52 +727,96 @@
 
 	 if (store_relation)
 	 {
-		 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_RELATION, dboid, objid, false);
-		 if (entry_ref)
+		 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
 		 {
-			 shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-			 data = shared->data;
-			 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
-				 evs_accum_buffers((EvsBuffersStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_BUFFERS)]), &params->common);
-			 if (evs_collect_mask & EVS_COLLECT_WAL)
-				 evs_accum_wal((EvsWalStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_WAL)]), &params->common);
-			 if (evs_collect_mask & EVS_COLLECT_GENERAL)
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_REL_BUF, dboid, objid, false);
+			 if (entry_ref)
 			 {
-				 EvsGeneralStats *g = (EvsGeneralStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_GENERAL)]);
-				 if (g->type == PGSTAT_EXTVAC_INVALID)
-					 memset(g, 0, sizeof(*g));
-				 evs_accum_general_rel(g, params);
+				 PgStatShared_ExtVacBuffers *s = (PgStatShared_ExtVacBuffers *) entry_ref->shared_stats;
+				 evs_accum_buffers(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
 			 }
-			 if (evs_collect_mask & EVS_COLLECT_TIMING)
-				 evs_accum_timing((EvsTimingStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_TIMING)]), &params->common);
-			 pgstat_unlock_entry(entry_ref);
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_WAL)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_REL_WAL, dboid, objid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacWal *s = (PgStatShared_ExtVacWal *) entry_ref->shared_stats;
+				 evs_accum_wal(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
+			 }
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_GENERAL)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_REL_GEN, dboid, objid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacGeneral *s = (PgStatShared_ExtVacGeneral *) entry_ref->shared_stats;
+				 if (s->stats.type == PGSTAT_EXTVAC_INVALID)
+					 memset(&s->stats, 0, sizeof(s->stats));
+				 evs_accum_general_rel(&s->stats, params);
+				 pgstat_unlock_entry(entry_ref);
+			 }
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_TIMING)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_REL_TIM, dboid, objid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacTiming *s = (PgStatShared_ExtVacTiming *) entry_ref->shared_stats;
+				 evs_accum_timing(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
+			 }
 		 }
 	 }
 
 	 if (store_db)
 	 {
-		 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB, dboid, InvalidOid, false);
-		 if (entry_ref)
+		 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
 		 {
-			 shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-			 data = shared->data;
-			 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
-				 evs_accum_buffers((EvsBuffersStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_BUFFERS)]), &params->common);
-			 if (evs_collect_mask & EVS_COLLECT_WAL)
-				 evs_accum_wal((EvsWalStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_WAL)]), &params->common);
-			 if (evs_collect_mask & EVS_COLLECT_GENERAL)
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB_BUF, dboid, InvalidOid, false);
+			 if (entry_ref)
 			 {
-				 EvsGeneralStats *g = (EvsGeneralStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_GENERAL)]);
-				 if (g->type == PGSTAT_EXTVAC_INVALID)
-				 {
-					 memset(g, 0, sizeof(*g));
-					 g->type = PGSTAT_EXTVAC_DB;
-				 }
-				 evs_accum_general_db(g, &params->common);
+				 PgStatShared_ExtVacBuffers *s = (PgStatShared_ExtVacBuffers *) entry_ref->shared_stats;
+				 evs_accum_buffers(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
 			 }
-			 if (evs_collect_mask & EVS_COLLECT_TIMING)
-				 evs_accum_timing((EvsTimingStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_TIMING)]), &params->common);
-			 pgstat_unlock_entry(entry_ref);
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_WAL)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB_WAL, dboid, InvalidOid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacWal *s = (PgStatShared_ExtVacWal *) entry_ref->shared_stats;
+				 evs_accum_wal(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
+			 }
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_GENERAL)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB_GEN, dboid, InvalidOid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacGeneral *s = (PgStatShared_ExtVacGeneral *) entry_ref->shared_stats;
+				 if (s->stats.type == PGSTAT_EXTVAC_INVALID)
+				 {
+					 memset(&s->stats, 0, sizeof(s->stats));
+					 s->stats.type = PGSTAT_EXTVAC_DB;
+				 }
+				 evs_accum_general_db(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
+			 }
+		 }
+		 if (evs_collect_mask & EVS_COLLECT_TIMING)
+		 {
+			 entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_EXTVAC_DB_TIM, dboid, InvalidOid, false);
+			 if (entry_ref)
+			 {
+				 PgStatShared_ExtVacTiming *s = (PgStatShared_ExtVacTiming *) entry_ref->shared_stats;
+				 evs_accum_timing(&s->stats, &params->common);
+				 pgstat_unlock_entry(entry_ref);
+			 }
 		 }
 	 }
  }
@@ -750,42 +845,60 @@
 		 prev_report_vacuum_hook(tableoid, shared, params);
  }
 
- /* Reset statistics for a single relation entry. */
+ /* Reset statistics for a single relation entry (all 4 relation kinds). */
  static bool
  extvac_reset_by_relid(Oid dboid, Oid relid, int type)
  {
 	 uint64		objid = EXTVAC_OBJID(relid, type);
 
-	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_RELATION, dboid, objid, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_REL_BUF, dboid, objid, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_REL_WAL, dboid, objid, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_REL_GEN, dboid, objid, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_REL_TIM, dboid, objid, 0);
 	 return true;
  }
 
- /* Callback: match relation entries for given db. */
+ /* Callback: match relation entries for given db (any of 4 relation kinds) */
  static bool
  match_extvac_relations_for_db(PgStatShared_HashEntry *entry, Datum match_data)
  {
-	 return entry->key.kind == PGSTAT_KIND_EXTVAC_RELATION &&
-		 entry->key.dboid == DatumGetObjectId(match_data);
+	 Oid			dboid = DatumGetObjectId(match_data);
+
+	 if (entry->key.dboid != dboid)
+		 return false;
+	 return entry->key.kind == PGSTAT_KIND_EXTVAC_REL_BUF ||
+		 entry->key.kind == PGSTAT_KIND_EXTVAC_REL_WAL ||
+		 entry->key.kind == PGSTAT_KIND_EXTVAC_REL_GEN ||
+		 entry->key.kind == PGSTAT_KIND_EXTVAC_REL_TIM;
  }
 
  /*
-  * Reset statistics for a database (all relation entries + db aggregate).
+  * Reset statistics for a database (all relation entries + 4 db aggregates).
   */
  static int64
  extvac_database_reset(Oid dboid)
  {
 	 pgstat_reset_matching_entries(match_extvac_relations_for_db,
 								   ObjectIdGetDatum(dboid), 0);
-	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB, dboid, 0, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB_BUF, dboid, 0, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB_WAL, dboid, 0, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB_GEN, dboid, 0, 0);
+	 pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB_TIM, dboid, 0, 0);
 	 return 1;
  }
 
- /* Reset all vacuum statistics. */
+ /* Reset all vacuum statistics (8 kinds). */
  static int64
  extvac_stat_reset(void)
  {
-	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_RELATION);
-	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_REL_BUF);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_REL_WAL);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_REL_GEN);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_REL_TIM);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB_BUF);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB_WAL);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB_GEN);
+	 pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB_TIM);
 	 return 0;					/* count not available */
  }
 
@@ -826,16 +939,27 @@
  Datum
  extvac_shared_memory_size(PG_FUNCTION_ARGS)
  {
-	 uint64		rel_count;
-	 uint64		db_count;
-	 uint64		total;
-	 size_t		entry_size = evs_entry_shared_size();
+	 uint64		n;
+	 uint64		total_bytes = 0;
 
-	 rel_count = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_RELATION);
-	 db_count = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB);
-	 total = (rel_count + db_count) * entry_size;
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_REL_BUF);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacBuffers);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_REL_WAL);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacWal);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_REL_GEN);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacGeneral);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_REL_TIM);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacTiming);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB_BUF);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacBuffers);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB_WAL);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacWal);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB_GEN);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacGeneral);
+	 n = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB_TIM);
+	 total_bytes += n * sizeof(PgStatShared_ExtVacTiming);
 
-	 PG_RETURN_INT64((int64) total);
+	 PG_RETURN_INT64((int64) total_bytes);
  }
 
  /*
@@ -1153,31 +1277,30 @@
 	 {
 		 Oid			relid = PG_GETARG_OID(1);
 		 uint64		objid = EXTVAC_OBJID(relid, type);
-		 char	   *data;
-		 EvsBuffersStats *buf = NULL;
-		 EvsWalStats *wal = NULL;
-		 EvsGeneralStats *gen = NULL;
-		 EvsTimingStats *tim = NULL;
+		 EvsBuffersStats *buf;
+		 EvsWalStats *wal;
+		 EvsGeneralStats *gen;
+		 EvsTimingStats *tim;
 		 PgStat_VacuumRelationCounts merged;
 
 		 if (!OidIsValid(relid))
 			 return (Datum) 0;
 
-		 data = (char *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, dbid, objid);
-		 if (!data)
-			 data = (char *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, InvalidOid, objid);
+		 buf = (EvsBuffersStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_BUF, dbid, objid);
+		 if (!buf)
+			 buf = (EvsBuffersStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_BUF, InvalidOid, objid);
+		 wal = (EvsWalStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_WAL, dbid, objid);
+		 if (!wal)
+			 wal = (EvsWalStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_WAL, InvalidOid, objid);
+		 gen = (EvsGeneralStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_GEN, dbid, objid);
+		 if (!gen)
+			 gen = (EvsGeneralStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_GEN, InvalidOid, objid);
+		 tim = (EvsTimingStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_TIM, dbid, objid);
+		 if (!tim)
+			 tim = (EvsTimingStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_REL_TIM, InvalidOid, objid);
 
-		 if (data)
+		 if (buf || wal || gen || tim)
 		 {
-			 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
-				 buf = (EvsBuffersStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_BUFFERS)]);
-			 if (evs_collect_mask & EVS_COLLECT_WAL)
-				 wal = (EvsWalStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_WAL)]);
-			 if (evs_collect_mask & EVS_COLLECT_GENERAL)
-				 gen = (EvsGeneralStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_GENERAL)]);
-			 if (evs_collect_mask & EVS_COLLECT_TIMING)
-				 tim = (EvsTimingStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_TIMING)]);
-
 			 evs_merge_relation_stats(&merged, buf, wal, gen, tim, type);
 			 if (merged.type == type)
 				 tuplestore_put_for_relation(relid, tupstore, tupdesc, &merged);
@@ -1191,26 +1314,19 @@
 			 Datum		values[EXTVAC_DB_STAT_COLS];
 			 bool		nulls[EXTVAC_DB_STAT_COLS];
 			 int			i = 0;
-			 char	   *data;
-			 EvsBuffersStats *buf = NULL;
-			 EvsWalStats *wal = NULL;
-			 EvsGeneralStats *gen = NULL;
-			 EvsTimingStats *tim = NULL;
+			 EvsBuffersStats *buf;
+			 EvsWalStats *wal;
+			 EvsGeneralStats *gen;
+			 EvsTimingStats *tim;
 			 PgStat_VacuumRelationCounts merged;
 
-			 data = (char *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB, dbid, 0);
+			 buf = (EvsBuffersStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB_BUF, dbid, 0);
+			 wal = (EvsWalStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB_WAL, dbid, 0);
+			 gen = (EvsGeneralStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB_GEN, dbid, 0);
+			 tim = (EvsTimingStats *) pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB_TIM, dbid, 0);
 
-			 if (data)
+			 if (buf || wal || gen || tim)
 			 {
-				 if (evs_collect_mask & EVS_COLLECT_BUFFERS)
-					 buf = (EvsBuffersStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_BUFFERS)]);
-				 if (evs_collect_mask & EVS_COLLECT_WAL)
-					 wal = (EvsWalStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_WAL)]);
-				 if (evs_collect_mask & EVS_COLLECT_GENERAL)
-					 gen = (EvsGeneralStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_GENERAL)]);
-				 if (evs_collect_mask & EVS_COLLECT_TIMING)
-					 tim = (EvsTimingStats *) (data + evs_off[EVS_CAT_IDX(EVS_COLLECT_TIMING)]);
-
 				 evs_merge_relation_stats(&merged, buf, wal, gen, tim, PGSTAT_EXTVAC_DB);
 				 memset(nulls, 0, sizeof(nulls));
 				 values[i++] = ObjectIdGetDatum(dbid);
