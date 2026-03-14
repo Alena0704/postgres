@@ -45,6 +45,15 @@ PG_MODULE_MAGIC;
 #define EVS_FILTER_SYSTEM		0x01
 #define EVS_FILTER_USER			0x02
 
+/* Collect mask bits */
+#define EVS_COLLECT_BUFFERS	0x1 /* blks_*, blk_*_time */
+#define EVS_COLLECT_WAL		0x2 /* wal_records, wal_fpi, wal_bytes */
+#define EVS_COLLECT_GENERAL	0x4 /* tuples_deleted, pages_*, vm_*,
+								 * wraparound_failsafe_count, interrupts_count */
+#define EVS_COLLECT_TIMING	0x8 /* delay_time, total_time */
+#define EVS_COLLECT_ALL		(EVS_COLLECT_BUFFERS | EVS_COLLECT_WAL | \
+							 EVS_COLLECT_GENERAL | EVS_COLLECT_TIMING)
+
 /*  GUCs  */
 static bool evs_enabled = true;
 static char *evs_track = "all"; /* 'all', 'databases', 'relations' */
@@ -55,6 +64,8 @@ static bool evs_track_databases_from_list = false;	/* if true, track only
 													 * databases in list */
 static bool evs_track_relations_from_list = false;	/* if true, track only
 													 * relations in list */
+static char *evs_collect = "all";
+static int	evs_collect_mask = EVS_COLLECT_ALL;
 
 /*  Hook  */
 static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
@@ -98,6 +109,129 @@ typedef struct PgStatShared_ExtVacEntry
 	PgStat_VacuumRelationCounts stats;
 }			PgStatShared_ExtVacEntry;
 
+#define ACCUM_IF(dst, src, field, cat) \
+	do { if (evs_collect_mask & (cat)) (dst)->field += (src)->field; } while (0)
+
+static inline void
+pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
+{
+	ACCUM_IF(dst, src, total_blks_read, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_hit, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_dirtied, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_written, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blks_fetched, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blks_hit, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blk_read_time, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blk_write_time, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, delay_time, EVS_COLLECT_TIMING);
+	ACCUM_IF(dst, src, total_time, EVS_COLLECT_TIMING);
+	ACCUM_IF(dst, src, wal_records, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wal_fpi, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wal_bytes, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wraparound_failsafe_count, EVS_COLLECT_GENERAL);
+	ACCUM_IF(dst, src, interrupts_count, EVS_COLLECT_GENERAL);
+	ACCUM_IF(dst, src, tuples_deleted, EVS_COLLECT_GENERAL);
+}
+
+static inline void
+pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
+							   const PgStat_VacuumRelationCounts * src)
+{
+	if (dst->type == PGSTAT_EXTVAC_INVALID)
+		dst->type = src->type;
+
+	Assert(src->type != PGSTAT_EXTVAC_INVALID && src->type != PGSTAT_EXTVAC_DB);
+	Assert(src->type == dst->type);
+
+	pgstat_accumulate_common(&dst->common, &src->common);
+
+	if (dst->type == PGSTAT_EXTVAC_TABLE && (evs_collect_mask & EVS_COLLECT_GENERAL) != 0)
+	{
+		dst->table.pages_scanned += src->table.pages_scanned;
+		dst->table.pages_removed += src->table.pages_removed;
+		dst->table.tuples_frozen += src->table.tuples_frozen;
+		dst->table.recently_dead_tuples += src->table.recently_dead_tuples;
+		dst->table.vm_new_frozen_pages += src->table.vm_new_frozen_pages;
+		dst->table.vm_new_visible_pages += src->table.vm_new_visible_pages;
+		dst->table.vm_new_visible_frozen_pages += src->table.vm_new_visible_frozen_pages;
+		dst->table.missed_dead_pages += src->table.missed_dead_pages;
+		dst->table.missed_dead_tuples += src->table.missed_dead_tuples;
+		dst->table.index_vacuum_count += src->table.index_vacuum_count;
+	}
+	else if (dst->type == PGSTAT_EXTVAC_INDEX && (evs_collect_mask & EVS_COLLECT_GENERAL) != 0)
+	{
+		dst->index.pages_deleted += src->index.pages_deleted;
+	}
+}
+
+static inline void
+pgstat_accumulate_common_for_db(PgStat_CommonCounts * dst,
+								const PgStat_CommonCounts * src)
+{
+	pgstat_accumulate_common(dst, src);
+}
+
+static void
+evs_assign_collect_mask(const char *newval, void *extra)
+{
+	int			mask = 0;
+	char	   *copy;
+	char	   *p;
+	char	   *tok;
+
+	if (!newval || newval[0] == '\0')
+	{
+		mask = EVS_COLLECT_ALL;
+	}
+	else
+	{
+		copy = pstrdup(newval);
+		for (p = copy; (tok = strtok(p, " \t")); p = NULL)
+		{
+			if (pg_strcasecmp(tok, "all") == 0)
+			{
+				mask = EVS_COLLECT_ALL;
+				break;
+			}
+			if (pg_strcasecmp(tok, "buffers") == 0)
+				mask |= EVS_COLLECT_BUFFERS;
+			else if (pg_strcasecmp(tok, "wal") == 0)
+				mask |= EVS_COLLECT_WAL;
+			else if (pg_strcasecmp(tok, "general") == 0)
+				mask |= EVS_COLLECT_GENERAL;
+			else if (pg_strcasecmp(tok, "timing") == 0)
+				mask |= EVS_COLLECT_TIMING;
+		}
+		pfree(copy);
+		mask = (mask != 0) ? mask : EVS_COLLECT_ALL;
+	}
+
+	evs_collect_mask = mask;
+}
+
+/* GUC assign hooks: parse string and update bit flags */
+static void
+evs_track_assign_hook(const char *newval, void *extra)
+{
+	if (strcmp(newval, "databases") == 0)
+		evs_track_bits = EVS_TRACK_DATABASES;
+	else if (strcmp(newval, "relations") == 0)
+		evs_track_bits = EVS_TRACK_RELATIONS;
+	else
+		evs_track_bits = EVS_TRACK_RELATIONS | EVS_TRACK_DATABASES; /* "all" or unknown */
+}
+
+static void
+evs_track_relations_assign_hook(const char *newval, void *extra)
+{
+	if (strcmp(newval, "system") == 0)
+		evs_track_relations_bits = EVS_FILTER_SYSTEM;
+	else if (strcmp(newval, "user") == 0)
+		evs_track_relations_bits = EVS_FILTER_USER;
+	else
+		evs_track_relations_bits = EVS_FILTER_SYSTEM | EVS_FILTER_USER; /* "all" or unknown */
+}
+
 /* PgStat kind for per-relation vacuum statistics (tables/indexes) */
 static const PgStat_KindInfo extvac_relation_kind_info = {
 	.name = "ext_vacuum_statistics_relation",
@@ -125,84 +259,6 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 	.pending_size = 0,
 	.flush_pending_cb = NULL,
 };
-
-#define ACCUM_IF(dst, src, field) \
-	do { (dst)->field += (src)->field; } while (0)
-
-static inline void
-pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
-{
-	ACCUM_IF(dst, src, total_blks_read);
-	ACCUM_IF(dst, src, total_blks_hit);
-	ACCUM_IF(dst, src, total_blks_dirtied);
-	ACCUM_IF(dst, src, total_blks_written);
-	ACCUM_IF(dst, src, blks_fetched);
-	ACCUM_IF(dst, src, blks_hit);
-	ACCUM_IF(dst, src, blk_read_time);
-	ACCUM_IF(dst, src, blk_write_time);
-	ACCUM_IF(dst, src, delay_time);
-	ACCUM_IF(dst, src, total_time);
-	ACCUM_IF(dst, src, wal_records);
-	ACCUM_IF(dst, src, wal_fpi);
-	ACCUM_IF(dst, src, wal_bytes);
-	ACCUM_IF(dst, src, wraparound_failsafe_count);
-	ACCUM_IF(dst, src, interrupts_count);
-	ACCUM_IF(dst, src, tuples_deleted);
-}
-
-static inline void
-pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
-							   const PgStat_VacuumRelationCounts * src)
-{
-	if (dst->type == PGSTAT_EXTVAC_INVALID)
-		dst->type = src->type;
-
-	Assert(src->type != PGSTAT_EXTVAC_INVALID && src->type != PGSTAT_EXTVAC_DB);
-	Assert(src->type == dst->type);
-
-	pgstat_accumulate_common(&dst->common, &src->common);
-
-	if (dst->type == PGSTAT_EXTVAC_TABLE)
-	{
-		dst->table.pages_scanned += src->table.pages_scanned;
-		dst->table.pages_removed += src->table.pages_removed;
-		dst->table.tuples_frozen += src->table.tuples_frozen;
-		dst->table.recently_dead_tuples += src->table.recently_dead_tuples;
-		dst->table.vm_new_frozen_pages += src->table.vm_new_frozen_pages;
-		dst->table.vm_new_visible_pages += src->table.vm_new_visible_pages;
-		dst->table.vm_new_visible_frozen_pages += src->table.vm_new_visible_frozen_pages;
-		dst->table.missed_dead_pages += src->table.missed_dead_pages;
-		dst->table.missed_dead_tuples += src->table.missed_dead_tuples;
-		dst->table.index_vacuum_count += src->table.index_vacuum_count;
-	}
-	else if (dst->type == PGSTAT_EXTVAC_INDEX)
-	{
-		dst->index.pages_deleted += src->index.pages_deleted;
-	}
-}
-
-/* GUC assign hooks: parse string and update bit flags */
-static void
-evs_track_assign_hook(const char *newval, void *extra)
-{
-	if (strcmp(newval, "databases") == 0)
-		evs_track_bits = EVS_TRACK_DATABASES;
-	else if (strcmp(newval, "relations") == 0)
-		evs_track_bits = EVS_TRACK_RELATIONS;
-	else
-		evs_track_bits = EVS_TRACK_RELATIONS | EVS_TRACK_DATABASES; /* "all" or unknown */
-}
-
-static void
-evs_track_relations_assign_hook(const char *newval, void *extra)
-{
-	if (strcmp(newval, "system") == 0)
-		evs_track_relations_bits = EVS_FILTER_SYSTEM;
-	else if (strcmp(newval, "user") == 0)
-		evs_track_relations_bits = EVS_FILTER_USER;
-	else
-		evs_track_relations_bits = EVS_FILTER_SYSTEM | EVS_FILTER_USER; /* "all" or unknown */
-}
 
 void
 _PG_init(void)
@@ -237,6 +293,11 @@ _PG_init(void)
 							 "If true, track only relations added via add_track_relation.",
 							 NULL, &evs_track_relations_from_list, false,
 							 PGC_SUSET, 0, NULL, NULL, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.collect",
+							   "Stats categories to collect: buffers, wal, general, timing, all.",
+							   NULL, &evs_collect, "all",
+							   PGC_SUSET, 0, NULL, evs_assign_collect_mask, NULL);
 
 	MarkGUCPrefixReserved(SJ_NODENAME);
 
@@ -494,19 +555,12 @@ evs_should_track_database_statistics(Oid dboid)
 }
 
 
-/* Accumulate common counts for database-level stats. */
-static inline void
-pgstat_accumulate_common_for_db(PgStat_CommonCounts * dst,
-								const PgStat_CommonCounts * src)
-{
-	pgstat_accumulate_common(dst, src);
-}
-
 /*
  * Store incoming vacuum stats into pgstat custom statistics.
  * store_relation: create/update per-relation entry
  * store_db: accumulate into database-level entry (dboid, objid=0).
  * Uses pgstat_get_entry_ref_locked and pgstat_accumulate_* for atomic updates.
+ * Only fields matching evs_collect_mask are accumulated.
  */
 static void
 extvac_store(Oid dboid, Oid relid, int type,
@@ -527,11 +581,7 @@ extvac_store(Oid dboid, Oid relid, int type,
 		if (entry_ref)
 		{
 			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
-			{
-				memset(&shared->stats, 0, sizeof(shared->stats));
-				shared->stats.type = params->type;
-			}
+			Assert(shared->stats.type != PGSTAT_EXTVAC_INVALID);
 			pgstat_accumulate_extvac_stats(&shared->stats, params);
 			pgstat_unlock_entry(entry_ref);
 		}
@@ -543,11 +593,7 @@ extvac_store(Oid dboid, Oid relid, int type,
 		if (entry_ref)
 		{
 			shared = (PgStatShared_ExtVacEntry *) entry_ref->shared_stats;
-			if (shared->stats.type == PGSTAT_EXTVAC_INVALID)
-			{
-				memset(&shared->stats, 0, sizeof(shared->stats));
-				shared->stats.type = PGSTAT_EXTVAC_DB;
-			}
+			Assert(shared->stats.type != PGSTAT_EXTVAC_INVALID);
 			pgstat_accumulate_common_for_db(&shared->stats.common, &params->common);
 			pgstat_unlock_entry(entry_ref);
 		}
@@ -646,6 +692,12 @@ extvac_reset_db_entry(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(extvac_database_reset(dboid));
 }
 
+static uint32
+evs_entry_shared_size(void)
+{
+	return offsetof(PgStatShared_ExtVacEntry, data) + evs_shared_data_len;
+}
+
 /*
  * Return total shared memory in bytes used by the extension for vacuum stats.
  * Used for monitoring and capacity planning: memory grows with the number of
@@ -657,13 +709,13 @@ extvac_shared_memory_size(PG_FUNCTION_ARGS)
 	uint64		rel_count;
 	uint64		db_count;
 	uint64		total;
-	size_t		entry_size = sizeof(PgStatShared_ExtVacEntry);
+	size_t		entry_size = evs_entry_shared_size();
 
 	rel_count = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_RELATION);
 	db_count = pgstat_get_entry_count(PGSTAT_KIND_EXTVAC_DB);
-	total = rel_count + db_count;
+	total = (rel_count + db_count) * entry_size;
 
-	PG_RETURN_INT64((int64) (total * entry_size));
+	PG_RETURN_INT64((int64) total);
 }
 
 /*
@@ -969,7 +1021,6 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 				tuplestore_putvalues(tupstore, tupdesc, values, nulls);
 			}
 		}
-		/* invalid dbid: return empty set */
 	}
 	else
 		elog(PANIC, "ext_vacuum_statistics: invalid type %d", type);
