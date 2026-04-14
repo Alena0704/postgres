@@ -68,9 +68,10 @@ sub reset_and_vacuum {
             "DELETE FROM $table;",
         ) : (),
         "VACUUM $table;",
-        (map { "VACUUM $_;" } @$extra));
+        (map { "VACUUM $_;" } @$extra),
+        # Make pending stats visible to subsequent sessions without sleeping.
+        "SELECT pg_stat_force_next_flush();");
     $node->safe_psql($db, $sql);
-    sleep(0.1);
 }
 
 #------------------------------------------------------------------------------
@@ -84,12 +85,23 @@ subtest 'vacuum_statistics.enabled' => sub {
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
     ok($count > 0, 'stats collected when enabled');
 
-    # Disable, reset and vacuum in same session
+    # Disable, reset and vacuum in same session.  Assert not only that the
+    # row count is zero, but that the specific counters remain zero: a stray
+    # row with zero counters would otherwise pass a bare COUNT(*)=0 check.
     reset_and_vacuum($dbname, 'guc_test', { gucs => ['vacuum_statistics.enabled = off'] });
 
     $count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
-    is($count, 0, 'no stats when disabled');
+    is($count, 0, 'no rows when disabled');
+
+    my $sums = $node->safe_psql($dbname, q{
+        SELECT COALESCE(SUM(total_blks_read), 0)
+             + COALESCE(SUM(total_blks_dirtied), 0)
+             + COALESCE(SUM(pages_scanned), 0)
+          FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+         WHERE relname = 'guc_test'
+    });
+    is($sums, '0', 'no counters accumulated when disabled');
 };
 
 #------------------------------------------------------------------------------
