@@ -29,6 +29,7 @@
 #include "utils/lsyscache.h"
 #include "utils/pgstat_kind.h"
 #include "utils/pgstat_internal.h"
+#include "utils/tuplestore.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -1207,11 +1208,13 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 			return (Datum) 0;
 
 		stats = (PgStat_VacuumRelationCounts *)
-			pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, dbid, EXTVAC_OBJID(relid, type));
+			pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, dbid,
+							   EXTVAC_OBJID(relid, type), NULL);
 
 		if (!stats)
 			stats = (PgStat_VacuumRelationCounts *)
-				pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, InvalidOid, EXTVAC_OBJID(relid, type));
+				pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, InvalidOid,
+								   EXTVAC_OBJID(relid, type), NULL);
 
 		if (stats && stats->type == type)
 			tuplestore_put_for_relation(relid, tupstore, tupdesc, stats);
@@ -1227,7 +1230,8 @@ pg_stats_vacuum(FunctionCallInfo fcinfo, int type)
 			PgStat_VacuumRelationCounts *stats;
 
 			stats = (PgStat_VacuumRelationCounts *)
-				pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB, dbid, InvalidOid);
+				pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_DB, dbid,
+								   InvalidOid, NULL);
 			if (stats && stats->type == PGSTAT_EXTVAC_DB)
 			{
 				memset(nulls, 0, sizeof(nulls));
