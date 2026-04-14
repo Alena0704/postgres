@@ -73,6 +73,18 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION ext_vacuum_statistics.track_list() IS
   'List of database and relation OIDs for which vacuum statistics are collected.';
 
+-- Track-list mutation requires superuser or pg_read_all_stats; hide the
+-- functions from PUBLIC so the error is also produced for ordinary users
+-- before the C-level privilege check runs.
+REVOKE ALL ON FUNCTION ext_vacuum_statistics.add_track_database(oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ext_vacuum_statistics.remove_track_database(oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ext_vacuum_statistics.add_track_relation(oid, oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ext_vacuum_statistics.remove_track_relation(oid, oid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ext_vacuum_statistics.add_track_database(oid) TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION ext_vacuum_statistics.remove_track_database(oid) TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION ext_vacuum_statistics.add_track_relation(oid, oid) TO pg_read_all_stats;
+GRANT EXECUTE ON FUNCTION ext_vacuum_statistics.remove_track_relation(oid, oid) TO pg_read_all_stats;
+
 -- Internal C function to fetch table vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  dboid oid,
@@ -106,7 +118,7 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_tables'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT STABLE;
 
 -- Internal C function to fetch index vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_indexes(
@@ -132,7 +144,7 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_indexes(
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_indexes'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT STABLE;
 
 -- Internal C function to fetch database vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_database(
@@ -154,7 +166,7 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_database(
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_database'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT STABLE;
 
 -- View: vacuum statistics per table (heap)
 CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_tables AS

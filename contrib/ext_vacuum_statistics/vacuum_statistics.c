@@ -11,6 +11,7 @@
 #include "access/transam.h"
 #include "catalog/catalog.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
 #include "fmgr.h"
@@ -18,6 +19,9 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
@@ -59,6 +63,7 @@ static bool evs_track_relations_from_list = false;	/* if true, track only
 /*  Hook  */
 static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
 static object_access_hook_type prev_object_access_hook = NULL;
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 
 /*  Forward declarations  */
 static void pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
@@ -69,13 +74,27 @@ static void evs_track_save_file(void);
 static void evs_track_load_file(void);
 static void evs_drop_access_hook(ObjectAccessType access, Oid classId,
 								 Oid objectId, int subId, void *arg);
+static void evs_shmem_request(void);
 
-/* Hash tables for track_databases and track_relations_list */
+/* Hash tables for track_databases and track_relations_list (backend-local) */
 static HTAB *evs_track_databases_hash = NULL;
 static HTAB *evs_track_relations_hash = NULL;
 static bool evs_track_hash_initialized = false;
 
-static void evs_track_load_file(void);
+/*
+ * Named LWLock tranche protecting the on-disk track file and serializing
+ * backend-local reloads/saves across concurrent backends.
+ */
+#define EVS_TRACK_TRANCHE_NAME "ext_vacuum_statistics_track"
+static LWLock *evs_track_lock = NULL;
+
+static inline LWLock *
+evs_get_track_lock(void)
+{
+	if (evs_track_lock == NULL)
+		evs_track_lock = &GetNamedLWLockTranche(EVS_TRACK_TRANCHE_NAME)->lock;
+	return evs_track_lock;
+}
 
 /*
  * objid encoding for relations: (relid << 2) | (type & 3)
@@ -127,7 +146,7 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 };
 
 #define ACCUM_IF(dst, src, field) \
-	do { (dst)->field += (src)->field; } while (0)
+	do { ((dst))->field += ((src))->field; } while (0)
 
 static inline void
 pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
@@ -181,27 +200,76 @@ pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
 	}
 }
 
-/* GUC assign hooks: parse string and update bit flags */
+/*
+ * GUC check hooks: validate the string and compute the bitmask into *extra.
+ * Rejecting unknown values here prevents silent fall-through to "all".
+ */
+static bool
+evs_track_check_hook(char **newval, void **extra, GucSource source)
+{
+	int		   *bits;
+
+	if (*newval == NULL)
+		return false;
+
+	bits = (int *) guc_malloc(LOG, sizeof(int));
+	if (!bits)
+		return false;
+
+	if (strcmp(*newval, "all") == 0)
+		*bits = EVS_TRACK_RELATIONS | EVS_TRACK_DATABASES;
+	else if (strcmp(*newval, "databases") == 0)
+		*bits = EVS_TRACK_DATABASES;
+	else if (strcmp(*newval, "relations") == 0)
+		*bits = EVS_TRACK_RELATIONS;
+	else
+	{
+		guc_free(bits);
+		GUC_check_errdetail("Allowed values are \"all\", \"databases\", \"relations\".");
+		return false;
+	}
+	*extra = bits;
+	return true;
+}
+
 static void
 evs_track_assign_hook(const char *newval, void *extra)
 {
-	if (strcmp(newval, "databases") == 0)
-		evs_track_bits = EVS_TRACK_DATABASES;
-	else if (strcmp(newval, "relations") == 0)
-		evs_track_bits = EVS_TRACK_RELATIONS;
+	evs_track_bits = *((int *) extra);
+}
+
+static bool
+evs_track_relations_check_hook(char **newval, void **extra, GucSource source)
+{
+	int		   *bits;
+
+	if (*newval == NULL)
+		return false;
+
+	bits = (int *) guc_malloc(LOG, sizeof(int));
+	if (!bits)
+		return false;
+
+	if (strcmp(*newval, "all") == 0)
+		*bits = EVS_FILTER_SYSTEM | EVS_FILTER_USER;
+	else if (strcmp(*newval, "system") == 0)
+		*bits = EVS_FILTER_SYSTEM;
+	else if (strcmp(*newval, "user") == 0)
+		*bits = EVS_FILTER_USER;
 	else
-		evs_track_bits = EVS_TRACK_RELATIONS | EVS_TRACK_DATABASES; /* "all" or unknown */
+	{
+		guc_free(bits);
+		GUC_check_errdetail("Allowed values are \"all\", \"system\", \"user\".");
+		return false;
+	}
+	*extra = bits;
+	return true;
 }
 
 static void
 evs_track_relations_assign_hook(const char *newval, void *extra)
 {
-	if (strcmp(newval, "system") == 0)
-		evs_track_relations_bits = EVS_FILTER_SYSTEM;
-	else if (strcmp(newval, "user") == 0)
-		evs_track_relations_bits = EVS_FILTER_USER;
-	else
-		evs_track_relations_bits = EVS_FILTER_SYSTEM | EVS_FILTER_USER; /* "all" or unknown */
+	evs_track_relations_bits = *((int *) extra);
 }
 
 void
@@ -221,12 +289,16 @@ _PG_init(void)
 	DefineCustomStringVariable("vacuum_statistics.object_types",
 							   "Object types for statistics: 'all', 'databases', 'relations'.",
 							   NULL, &evs_track, "all",
-							   PGC_SUSET, 0, NULL, evs_track_assign_hook, NULL);
+							   PGC_SUSET, 0,
+							   evs_track_check_hook,
+							   evs_track_assign_hook, NULL);
 
 	DefineCustomStringVariable("vacuum_statistics.track_relations",
 							   "When tracking relations: 'all', 'system', 'user'.",
 							   NULL, &evs_track_relations, "all",
-							   PGC_SUSET, 0, NULL, evs_track_relations_assign_hook, NULL);
+							   PGC_SUSET, 0,
+							   evs_track_relations_check_hook,
+							   evs_track_relations_assign_hook, NULL);
 
 	DefineCustomBoolVariable("vacuum_statistics.track_databases_from_list",
 							 "If true, track only databases added via add_track_database.",
@@ -243,11 +315,23 @@ _PG_init(void)
 	pgstat_register_kind(PGSTAT_KIND_EXTVAC_RELATION, &extvac_relation_kind_info);
 	pgstat_register_kind(PGSTAT_KIND_EXTVAC_DB, &extvac_db_kind_info);
 
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = evs_shmem_request;
+
 	prev_report_vacuum_hook = set_report_vacuum_hook;
 	set_report_vacuum_hook = pgstat_report_vacuum_extstats;
 
 	prev_object_access_hook = object_access_hook;
 	object_access_hook = evs_drop_access_hook;
+}
+
+static void
+evs_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestNamedLWLockTranche(EVS_TRACK_TRANCHE_NAME, 1);
 }
 
 /*
@@ -270,6 +354,9 @@ evs_drop_access_hook(ObjectAccessType access, Oid classId,
 
 			if (relkind == RELKIND_RELATION || relkind == RELKIND_INDEX)
 			{
+				LWLock	   *lock = evs_get_track_lock();
+
+				LWLockAcquire(lock, LW_EXCLUSIVE);
 				evs_track_hash_ensure_init();
 				key.dboid = MyDatabaseId;
 				key.reloid = objectId;
@@ -277,16 +364,20 @@ evs_drop_access_hook(ObjectAccessType access, Oid classId,
 				key.dboid = InvalidOid;
 				hash_search(evs_track_relations_hash, &key, HASH_REMOVE, &found);
 				evs_track_save_file();
+				LWLockRelease(lock);
 			}
 		}
 
 		if (classId == DatabaseRelationId && objectId != InvalidOid)
 		{
+			LWLock	   *lock = evs_get_track_lock();
 			bool		found;
 
+			LWLockAcquire(lock, LW_EXCLUSIVE);
 			evs_track_hash_ensure_init();
 			hash_search(evs_track_databases_hash, &objectId, HASH_REMOVE, &found);
 			evs_track_save_file();
+			LWLockRelease(lock);
 		}
 	}
 }
@@ -299,85 +390,149 @@ evs_drop_access_hook(ObjectAccessType access, Oid classId,
  * is enabled.
  * Data stores in pg_stat/ext_vacuum_statistics_track.oid
  */
+/*
+ * Initialize the backend-local tracking hashes and load their contents
+ * from the on-disk file.
+ *
+ * The hashes are per-backend, so no lock is needed to protect them from
+ * other processes; however, another backend may be concurrently rewriting
+ * the track file, so we take a shared lock for the file read.
+ */
 static void
 evs_track_hash_ensure_init(void)
 {
 	HASHCTL		ctl;
+	LWLock	   *lock;
+	bool		need_load;
 
 	if (evs_track_hash_initialized)
 		return;
 
-	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = sizeof(Oid);
-	ctl.hcxt = TopMemoryContext;
-	/* Hash of database OIDs to track specific databases */
-	evs_track_databases_hash = hash_create("ext_vacuum_statistics track databases",
-										   64, &ctl, HASH_ELEM | HASH_BLOBS);
+	lock = evs_get_track_lock();
 
-	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(EvsTrackRelKey);
-	ctl.entrysize = sizeof(EvsTrackRelKey);
-	ctl.hcxt = TopMemoryContext;
-	/* Hash of (dboid, reloid) to track specific relations */
-	evs_track_relations_hash = hash_create("ext_vacuum_statistics track relations",
-										   64, &ctl, HASH_ELEM | HASH_BLOBS);
+	if (evs_track_databases_hash == NULL)
+	{
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(Oid);
+		ctl.hcxt = TopMemoryContext;
+		evs_track_databases_hash =
+			hash_create("ext_vacuum_statistics track databases",
+						64, &ctl, HASH_ELEM | HASH_BLOBS);
+	}
 
-	evs_track_load_file();
-	evs_track_hash_initialized = true;
+	if (evs_track_relations_hash == NULL)
+	{
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(EvsTrackRelKey);
+		ctl.entrysize = sizeof(EvsTrackRelKey);
+		ctl.hcxt = TopMemoryContext;
+		evs_track_relations_hash =
+			hash_create("ext_vacuum_statistics track relations",
+						64, &ctl, HASH_ELEM | HASH_BLOBS);
+	}
+
+	need_load = !LWLockHeldByMe(lock);
+	if (need_load)
+		LWLockAcquire(lock, LW_SHARED);
+	PG_TRY();
+	{
+		evs_track_load_file();
+		evs_track_hash_initialized = true;
+	}
+	PG_FINALLY();
+	{
+		if (need_load)
+			LWLockRelease(lock);
+	}
+	PG_END_TRY();
 }
 
+/*
+ * Load track lists from disk into the backend-local hashes.
+ *
+ * Caller must hold evs_track_lock at least in shared mode, since the file
+ * may be concurrently rewritten by another backend.
+ */
 static void
 evs_track_load_file(void)
 {
 	char		path[MAXPGPATH];
 	FILE	   *fp;
-	char		buf[256];
+	char		buf[MAXPGPATH];
 	bool		in_relations = false;
 	Oid			oid;
 	EvsTrackRelKey key;
 	bool		found;
 
-	if (!DataDir || DataDir[0] == '\0' || !evs_track_databases_hash || !evs_track_relations_hash)
+	if (!DataDir || DataDir[0] == '\0' ||
+		!evs_track_databases_hash || !evs_track_relations_hash)
 		return;
 
 	snprintf(path, sizeof(path), "%s/%s", DataDir, EVS_TRACK_FILENAME);
 	fp = AllocateFile(path, "r");
 	if (!fp)
-		return;
-
-	while (fgets(buf, sizeof(buf), fp))
 	{
-		if (strncmp(buf, "[databases]", 11) == 0)
+		if (errno != ENOENT)
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not open track file \"%s\": %m", path)));
+		return;
+	}
+
+	PG_TRY();
+	{
+		while (fgets(buf, sizeof(buf), fp))
 		{
-			in_relations = false;
-			continue;
-		}
-		if (strncmp(buf, "[relations]", 11) == 0)
-		{
-			in_relations = true;
-			continue;
-		}
-		if (in_relations)
-		{
-			if (sscanf(buf, "%u %u", &key.dboid, &key.reloid) == 2)
-				hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
-			else if (sscanf(buf, "%u", &oid) == 1)
+			size_t		len = strlen(buf);
+
+			/* Reject unterminated lines (longer than buffer) as corruption. */
+			if (len > 0 && buf[len - 1] != '\n' && !feof(fp))
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("line too long in track file \"%s\"", path)));
+
+			if (strncmp(buf, "[databases]", 11) == 0)
 			{
-				key.dboid = InvalidOid;
-				key.reloid = oid;
-				hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
+				in_relations = false;
+				continue;
 			}
-		}
-		else
-		{
-			if (sscanf(buf, "%u", &oid) == 1)
+			if (strncmp(buf, "[relations]", 11) == 0)
+			{
+				in_relations = true;
+				continue;
+			}
+			if (in_relations)
+			{
+				if (sscanf(buf, "%u %u", &key.dboid, &key.reloid) == 2)
+					hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
+				else if (sscanf(buf, "%u", &oid) == 1)
+				{
+					key.dboid = InvalidOid;
+					key.reloid = oid;
+					hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
+				}
+			}
+			else if (sscanf(buf, "%u", &oid) == 1)
 				hash_search(evs_track_databases_hash, &oid, HASH_ENTER, &found);
 		}
+
+		if (ferror(fp))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read track file \"%s\": %m", path)));
 	}
-	FreeFile(fp);
+	PG_FINALLY();
+	{
+		FreeFile(fp);
+	}
+	PG_END_TRY();
 }
 
+/*
+ * Atomically rewrite the track file. Caller must hold evs_track_lock
+ * in exclusive mode.
+ */
 static void
 evs_track_save_file(void)
 {
@@ -387,33 +542,115 @@ evs_track_save_file(void)
 	HASH_SEQ_STATUS status;
 	Oid		   *entry;
 	EvsTrackRelKey *rel_entry;
+	bool		failed = false;
 
-	if (!DataDir || DataDir[0] == '\0' || !evs_track_databases_hash || !evs_track_relations_hash)
+	if (!DataDir || DataDir[0] == '\0' ||
+		!evs_track_databases_hash || !evs_track_relations_hash)
 		return;
 
 	snprintf(path, sizeof(path), "%s/%s", DataDir, EVS_TRACK_FILENAME);
-	snprintf(tmppath, sizeof(tmppath), "%s/%s.tmp", DataDir, EVS_TRACK_FILENAME);
-	fp = AllocateFile(tmppath, "w");
+	snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
+
+	fp = AllocateFile(tmppath, PG_BINARY_W);
 	if (!fp)
-		return;
-
-	fprintf(fp, "[databases]\n");
-	hash_seq_init(&status, evs_track_databases_hash);
-	while ((entry = (Oid *) hash_seq_search(&status)) != NULL)
-		fprintf(fp, "%u\n", *entry);
-
-	fprintf(fp, "[relations]\n");
-	hash_seq_init(&status, evs_track_relations_hash);
-	while ((rel_entry = (EvsTrackRelKey *) hash_seq_search(&status)) != NULL)
 	{
-		if (OidIsValid(rel_entry->dboid))
-			fprintf(fp, "%u %u\n", rel_entry->dboid, rel_entry->reloid);
-		else
-			fprintf(fp, "0 %u\n", rel_entry->reloid);
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not create track file \"%s\": %m", tmppath)));
+		return;
 	}
 
-	if (FreeFile(fp) != 0 || rename(tmppath, path) != 0)
-		unlink(tmppath);
+	PG_TRY();
+	{
+		if (fputs("[databases]\n", fp) == EOF)
+			failed = true;
+
+		if (!failed)
+		{
+			hash_seq_init(&status, evs_track_databases_hash);
+			while ((entry = (Oid *) hash_seq_search(&status)) != NULL)
+			{
+				if (fprintf(fp, "%u\n", *entry) < 0)
+				{
+					hash_seq_term(&status);
+					failed = true;
+					break;
+				}
+			}
+		}
+
+		if (!failed && fputs("[relations]\n", fp) == EOF)
+			failed = true;
+
+		if (!failed)
+		{
+			hash_seq_init(&status, evs_track_relations_hash);
+			while ((rel_entry = (EvsTrackRelKey *) hash_seq_search(&status)) != NULL)
+			{
+				int			rc;
+
+				if (OidIsValid(rel_entry->dboid))
+					rc = fprintf(fp, "%u %u\n", rel_entry->dboid, rel_entry->reloid);
+				else
+					rc = fprintf(fp, "0 %u\n", rel_entry->reloid);
+				if (rc < 0)
+				{
+					hash_seq_term(&status);
+					failed = true;
+					break;
+				}
+			}
+		}
+
+		if (!failed && fflush(fp) != 0)
+			failed = true;
+
+		if (!failed)
+		{
+			int			fd = fileno(fp);
+
+			if (fd >= 0 && pg_fsync(fd) != 0)
+				ereport(LOG,
+						(errcode_for_file_access(),
+						 errmsg("could not fsync track file \"%s\": %m",
+								tmppath)));
+		}
+	}
+	PG_CATCH();
+	{
+		FreeFile(fp);
+		(void) unlink(tmppath);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	if (FreeFile(fp) != 0)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not close track file \"%s\": %m", tmppath)));
+		failed = true;
+	}
+
+	if (failed)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not write track file \"%s\": %m", tmppath)));
+		if (unlink(tmppath) != 0 && errno != ENOENT)
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not unlink \"%s\": %m", tmppath)));
+		return;
+	}
+
+	if (durable_rename(tmppath, path, LOG) != 0)
+	{
+		if (unlink(tmppath) != 0 && errno != ENOENT)
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not unlink \"%s\": %m", tmppath)));
+	}
 }
 
 /*
@@ -676,15 +913,35 @@ PG_FUNCTION_INFO_V1(evs_remove_track_database);
 PG_FUNCTION_INFO_V1(evs_add_track_relation);
 PG_FUNCTION_INFO_V1(evs_remove_track_relation);
 
+/*
+ * Mutating track-list entry points: require server-wide privilege, since
+ * the underlying lists steer tracking for every backend.
+ */
+static void
+evs_require_track_privilege(const char *funcname)
+{
+	if (!superuser() && !has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for function %s", funcname),
+				 errhint("Only superusers and members of pg_read_all_stats "
+						 "may change the vacuum statistics track list.")));
+}
+
 Datum
 evs_add_track_database(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 	bool		found;
+	LWLock	   *lock;
 
+	evs_require_track_privilege("add_track_database");
+	lock = evs_get_track_lock();
+	LWLockAcquire(lock, LW_EXCLUSIVE);
 	evs_track_hash_ensure_init();
 	hash_search(evs_track_databases_hash, &oid, HASH_ENTER, &found);
 	evs_track_save_file();
+	LWLockRelease(lock);
 	PG_RETURN_BOOL(!found);		/* true if newly added */
 }
 
@@ -693,10 +950,15 @@ evs_remove_track_database(PG_FUNCTION_ARGS)
 {
 	Oid			oid = PG_GETARG_OID(0);
 	bool		found;
+	LWLock	   *lock;
 
+	evs_require_track_privilege("remove_track_database");
+	lock = evs_get_track_lock();
+	LWLockAcquire(lock, LW_EXCLUSIVE);
 	evs_track_hash_ensure_init();
 	hash_search(evs_track_databases_hash, &oid, HASH_REMOVE, &found);
 	evs_track_save_file();
+	LWLockRelease(lock);
 	PG_RETURN_BOOL(found);
 }
 
@@ -704,17 +966,19 @@ Datum
 evs_add_track_relation(PG_FUNCTION_ARGS)
 {
 	EvsTrackRelKey key;
+	bool		found;
+	LWLock	   *lock;
 
+	evs_require_track_privilege("add_track_relation");
 	key.dboid = PG_GETARG_OID(0);
 	key.reloid = PG_GETARG_OID(1);
-	{
-		bool		found;
-
-		evs_track_hash_ensure_init();
-		hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
-		evs_track_save_file();
-		PG_RETURN_BOOL(!found); /* true if newly added */
-	}
+	lock = evs_get_track_lock();
+	LWLockAcquire(lock, LW_EXCLUSIVE);
+	evs_track_hash_ensure_init();
+	hash_search(evs_track_relations_hash, &key, HASH_ENTER, &found);
+	evs_track_save_file();
+	LWLockRelease(lock);
+	PG_RETURN_BOOL(!found);		/* true if newly added */
 }
 
 Datum
@@ -722,12 +986,17 @@ evs_remove_track_relation(PG_FUNCTION_ARGS)
 {
 	EvsTrackRelKey key;
 	bool		found;
+	LWLock	   *lock;
 
+	evs_require_track_privilege("remove_track_relation");
 	key.dboid = PG_GETARG_OID(0);
 	key.reloid = PG_GETARG_OID(1);
+	lock = evs_get_track_lock();
+	LWLockAcquire(lock, LW_EXCLUSIVE);
 	evs_track_hash_ensure_init();
 	hash_search(evs_track_relations_hash, &key, HASH_REMOVE, &found);
 	evs_track_save_file();
+	LWLockRelease(lock);
 	PG_RETURN_BOOL(found);
 }
 
