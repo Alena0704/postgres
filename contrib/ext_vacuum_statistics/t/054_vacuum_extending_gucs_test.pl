@@ -11,6 +11,7 @@ use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
+ 
 use Test::More;
 
 #------------------------------------------------------------------------------
@@ -208,6 +209,69 @@ subtest 'track_relations (add/remove)' => sub {
     $rel_count = $node->safe_psql($dbname,
         "SELECT COUNT(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables WHERE relname = 'guc_test'");
     is($rel_count, 0, 'table removed from list: no stats');
+};
+
+#------------------------------------------------------------------------------
+# Test 6: vacuum_statistics.collect - per-category gating
+#
+# With collect='wal' only wal_* counters must advance; buffer, timing, and
+# general categories must stay at zero.  With collect='buffers' the inverse
+# holds.  Unknown tokens must be rejected by the check-hook.
+#------------------------------------------------------------------------------
+subtest 'vacuum_statistics.collect' => sub {
+    # wal-only: WAL counters should accumulate, buffers/timing/general should not.
+    reset_and_vacuum($dbname, 'guc_test', {
+        gucs => ["vacuum_statistics.collect = 'wal'"],
+        modify => 1,
+    });
+
+    my $wal = $node->safe_psql($dbname, q{
+        SELECT COALESCE(SUM(wal_records), 0) > 0
+          FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+         WHERE relname = 'guc_test'
+    });
+    is($wal, 't', "collect='wal': wal_records accumulated");
+
+    my $other = $node->safe_psql($dbname, q{
+        SELECT COALESCE(SUM(total_blks_read), 0)
+             + COALESCE(SUM(total_blks_hit), 0)
+             + COALESCE(SUM(total_time), 0)
+             + COALESCE(SUM(tuples_deleted), 0)
+             + COALESCE(SUM(pages_scanned), 0)
+          FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+         WHERE relname = 'guc_test'
+    });
+    is($other, '0',
+        "collect='wal': buffer/timing/general counters not accumulated");
+
+    # buffers-only: buffer counters should advance, WAL should not.
+    reset_and_vacuum($dbname, 'guc_test', {
+        gucs => ["vacuum_statistics.collect = 'buffers'"],
+        modify => 1,
+    });
+
+    my $buf = $node->safe_psql($dbname, q{
+        SELECT COALESCE(SUM(total_blks_read), 0)
+             + COALESCE(SUM(total_blks_hit), 0) > 0
+          FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+         WHERE relname = 'guc_test'
+    });
+    is($buf, 't', "collect='buffers': buffer counters accumulated");
+
+    my $wal_off = $node->safe_psql($dbname, q{
+        SELECT COALESCE(SUM(wal_records), 0)
+          FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+         WHERE relname = 'guc_test'
+    });
+    is($wal_off, '0',
+        "collect='buffers': WAL counters not accumulated");
+
+    # Unknown category must be rejected by the check-hook.
+    my ($ret, $stdout, $stderr) = $node->psql($dbname,
+        "SET vacuum_statistics.collect = 'nope'");
+    isnt($ret, 0, "collect='nope': rejected by check-hook");
+    like($stderr, qr/Unrecognized category "nope"/,
+        "collect='nope': errdetail names the offending token");
 };
 
 $node->stop;
