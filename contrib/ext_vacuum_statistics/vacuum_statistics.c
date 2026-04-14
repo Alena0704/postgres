@@ -50,6 +50,20 @@ PG_MODULE_MAGIC;
 #define EVS_FILTER_SYSTEM		0x01
 #define EVS_FILTER_USER			0x02
 
+/*
+ * Bit flags for evs_collect_mask. Each category groups counters that can be
+ * accumulated (or skipped) together, letting users reduce overhead at run
+ * time by turning off categories they don't need.
+ */
+#define EVS_COLLECT_BUFFERS		0x1 /* blks_*, blk_*_time */
+#define EVS_COLLECT_WAL			0x2 /* wal_records, wal_fpi, wal_bytes */
+#define EVS_COLLECT_GENERAL		0x4 /* tuples_deleted, pages_*, vm_*,
+									 * wraparound_failsafe_count,
+									 * interrupts_count */
+#define EVS_COLLECT_TIMING		0x8 /* delay_time, total_time */
+#define EVS_COLLECT_ALL			(EVS_COLLECT_BUFFERS | EVS_COLLECT_WAL | \
+								 EVS_COLLECT_GENERAL | EVS_COLLECT_TIMING)
+
 /*  GUCs  */
 static bool evs_enabled = true;
 static char *evs_track = "all"; /* 'all', 'databases', 'relations' */
@@ -60,6 +74,8 @@ static bool evs_track_databases_from_list = false;	/* if true, track only
 													 * databases in list */
 static bool evs_track_relations_from_list = false;	/* if true, track only
 													 * relations in list */
+static char *evs_collect = "all";	/* categories to collect */
+static int	evs_collect_mask = EVS_COLLECT_ALL;
 
 /*  Hook  */
 static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
@@ -146,28 +162,36 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 	.flush_pending_cb = NULL,
 };
 
-#define ACCUM_IF(dst, src, field) \
-	do { ((dst))->field += ((src))->field; } while (0)
+/*
+ * Accumulate a single counter only if its category is enabled in
+ * evs_collect_mask. Parentheses around every argument: the macro is invoked
+ * from expression contexts and with expressions as the destination pointer.
+ */
+#define ACCUM_IF(dst, src, field, cat) \
+	do { \
+		if ((evs_collect_mask) & (cat)) \
+			((dst))->field += ((src))->field; \
+	} while (0)
 
 static inline void
 pgstat_accumulate_common(PgStat_CommonCounts * dst, const PgStat_CommonCounts * src)
 {
-	ACCUM_IF(dst, src, total_blks_read);
-	ACCUM_IF(dst, src, total_blks_hit);
-	ACCUM_IF(dst, src, total_blks_dirtied);
-	ACCUM_IF(dst, src, total_blks_written);
-	ACCUM_IF(dst, src, blks_fetched);
-	ACCUM_IF(dst, src, blks_hit);
-	ACCUM_IF(dst, src, blk_read_time);
-	ACCUM_IF(dst, src, blk_write_time);
-	ACCUM_IF(dst, src, delay_time);
-	ACCUM_IF(dst, src, total_time);
-	ACCUM_IF(dst, src, wal_records);
-	ACCUM_IF(dst, src, wal_fpi);
-	ACCUM_IF(dst, src, wal_bytes);
-	ACCUM_IF(dst, src, wraparound_failsafe_count);
-	ACCUM_IF(dst, src, interrupts_count);
-	ACCUM_IF(dst, src, tuples_deleted);
+	ACCUM_IF(dst, src, total_blks_read, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_hit, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_dirtied, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, total_blks_written, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blks_fetched, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blks_hit, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blk_read_time, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, blk_write_time, EVS_COLLECT_BUFFERS);
+	ACCUM_IF(dst, src, delay_time, EVS_COLLECT_TIMING);
+	ACCUM_IF(dst, src, total_time, EVS_COLLECT_TIMING);
+	ACCUM_IF(dst, src, wal_records, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wal_fpi, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wal_bytes, EVS_COLLECT_WAL);
+	ACCUM_IF(dst, src, wraparound_failsafe_count, EVS_COLLECT_GENERAL);
+	ACCUM_IF(dst, src, interrupts_count, EVS_COLLECT_GENERAL);
+	ACCUM_IF(dst, src, tuples_deleted, EVS_COLLECT_GENERAL);
 }
 
 static inline void
@@ -182,7 +206,8 @@ pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
 
 	pgstat_accumulate_common(&dst->common, &src->common);
 
-	if (dst->type == PGSTAT_EXTVAC_TABLE)
+	if (dst->type == PGSTAT_EXTVAC_TABLE &&
+		(evs_collect_mask & EVS_COLLECT_GENERAL) != 0)
 	{
 		dst->table.pages_scanned += src->table.pages_scanned;
 		dst->table.pages_removed += src->table.pages_removed;
@@ -195,7 +220,8 @@ pgstat_accumulate_extvac_stats(PgStat_VacuumRelationCounts * dst,
 		dst->table.missed_dead_tuples += src->table.missed_dead_tuples;
 		dst->table.index_vacuum_count += src->table.index_vacuum_count;
 	}
-	else if (dst->type == PGSTAT_EXTVAC_INDEX)
+	else if (dst->type == PGSTAT_EXTVAC_INDEX &&
+			 (evs_collect_mask & EVS_COLLECT_GENERAL) != 0)
 	{
 		dst->index.pages_deleted += src->index.pages_deleted;
 	}
@@ -273,6 +299,84 @@ evs_track_relations_assign_hook(const char *newval, void *extra)
 	evs_track_relations_bits = *((int *) extra);
 }
 
+/*
+ * Check hook for vacuum_statistics.collect.
+ *
+ * Accepts a comma- or whitespace-separated list of category names
+ * (buffers, wal, general, timing) or the shorthand "all".  Computes the
+ * matching bitmask once and stashes it in *extra; the assign hook just
+ * copies it into evs_collect_mask.  Unknown tokens are rejected so the
+ * setting cannot silently collapse to the "all" default.
+ */
+static bool
+evs_collect_check_hook(char **newval, void **extra, GucSource source)
+{
+	int		   *mask;
+	char	   *copy;
+	char	   *p;
+	char	   *tok;
+	int			accum = 0;
+	bool		saw_all = false;
+
+	if (*newval == NULL)
+		return false;
+
+	mask = (int *) guc_malloc(LOG, sizeof(int));
+	if (!mask)
+		return false;
+
+	/* Empty string means "all", matching the default behavior. */
+	if ((*newval)[0] == '\0')
+	{
+		*mask = EVS_COLLECT_ALL;
+		*extra = mask;
+		return true;
+	}
+
+	copy = pstrdup(*newval);
+	for (p = copy; (tok = strtok(p, " \t,")) != NULL; p = NULL)
+	{
+		if (pg_strcasecmp(tok, "all") == 0)
+			saw_all = true;
+		else if (pg_strcasecmp(tok, "buffers") == 0)
+			accum |= EVS_COLLECT_BUFFERS;
+		else if (pg_strcasecmp(tok, "wal") == 0)
+			accum |= EVS_COLLECT_WAL;
+		else if (pg_strcasecmp(tok, "general") == 0)
+			accum |= EVS_COLLECT_GENERAL;
+		else if (pg_strcasecmp(tok, "timing") == 0)
+			accum |= EVS_COLLECT_TIMING;
+		else
+		{
+			/*
+			 * GUC_check_errdetail formats the message immediately, but tok
+			 * points into copy; emit the detail first, then free the
+			 * scratch buffer so the formatted string is already stashed in
+			 * GUC_check_errdetail_string.
+			 */
+			GUC_check_errdetail("Unrecognized category \"%s\" in vacuum_statistics.collect; "
+								"allowed values are \"all\", \"buffers\", \"wal\", \"general\", \"timing\".",
+								tok);
+			pfree(copy);
+			guc_free(mask);
+			return false;
+		}
+	}
+	pfree(copy);
+
+	*mask = saw_all ? EVS_COLLECT_ALL : accum;
+	if (*mask == 0)
+		*mask = EVS_COLLECT_ALL;
+	*extra = mask;
+	return true;
+}
+
+static void
+evs_collect_assign_hook(const char *newval, void *extra)
+{
+	evs_collect_mask = *((int *) extra);
+}
+
 void
 _PG_init(void)
 {
@@ -310,6 +414,16 @@ _PG_init(void)
 							 "If true, track only relations added via add_track_relation.",
 							 NULL, &evs_track_relations_from_list, false,
 							 PGC_SUSET, 0, NULL, NULL, NULL);
+
+	DefineCustomStringVariable("vacuum_statistics.collect",
+							   "Statistics categories to collect.",
+							   "Comma- or whitespace-separated list of: "
+							   "\"buffers\", \"wal\", \"general\", \"timing\"; "
+							   "or \"all\" for every category (default).",
+							   &evs_collect, "all",
+							   PGC_SUSET, 0,
+							   evs_collect_check_hook,
+							   evs_collect_assign_hook, NULL);
 
 	MarkGUCPrefixReserved(SJ_NODENAME);
 

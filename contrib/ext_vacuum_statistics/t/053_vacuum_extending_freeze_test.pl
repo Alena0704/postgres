@@ -98,8 +98,8 @@ sub wait_for_vacuum_stats {
         }
         else {
             $sql = "
-            SELECT (pg_stat_get_rev_all_frozen_pages(c.oid) > $tab_all_frozen_pages_count AND
-                     pg_stat_get_rev_all_visible_pages(c.oid) > $tab_all_visible_pages_count)
+            SELECT (pg_stat_get_frozen_page_marks_cleared(c.oid) > $tab_all_frozen_pages_count AND
+                     pg_stat_get_visible_page_marks_cleared(c.oid) > $tab_all_visible_pages_count)
                FROM pg_class c
               WHERE relname = 'vestat'";
         }
@@ -147,14 +147,14 @@ sub fetch_vacuum_stats {
 
     $rev_all_frozen_pages = $node->safe_psql(
         $dbname,
-        "SELECT pg_stat_get_rev_all_frozen_pages(c.oid)
+        "SELECT pg_stat_get_frozen_page_marks_cleared(c.oid)
            FROM pg_class c
           WHERE c.relname = 'vestat';"
     );
 
     $rev_all_visible_pages = $node->safe_psql(
         $dbname,
-        "SELECT pg_stat_get_rev_all_visible_pages(c.oid)
+        "SELECT pg_stat_get_visible_page_marks_cleared(c.oid)
            FROM pg_class c
           WHERE c.relname = 'vestat';"
     );
