@@ -1,0 +1,5 @@
+dboid,dbname,db_blks_read,db_blks_hit,db_blks_dirtied,db_blks_written,db_wal_records,db_wal_fpi,db_wal_bytes,db_blk_read_time,db_blk_write_time,db_delay_time,db_total_time,db_wraparound_failsafe_count,interrupts_count
+5,postgres,,,,,,,,,,,,,
+16384,bench,11667,45515,11666,11659,39076,4,2318153,5.109011,18.67707,0,260.947,0,0
+1,template1,,,,,,,,,,,,,
+4,template0,,,,,,,,,,,,,

@@ -1,0 +1,3 @@
+t_from,t_to,schemaname,relname,d_pages_scanned,d_tuples_deleted,d_pages_removed,d_blks_read,d_blks_dirty,d_wal_bytes,pages_per_dead_tuple,blks_read_per_dead_tuple,d_failsafe
+2026-04-26 01:44:35+03,2026-04-26 01:44:36+03,public,pgbench_accounts,1989,14,0,0,1,231020,142.07,0.00,0
+2026-04-26 01:45:22+03,2026-04-26 01:46:08+03,public,pgbench_accounts,41726,4392,0,0,0,314474,9.50,0.00,0

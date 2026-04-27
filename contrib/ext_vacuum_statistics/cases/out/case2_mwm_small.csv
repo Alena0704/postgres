@@ -1,0 +1,2 @@
+t_from,t_to,schemaname,relname,d_idx_passes,d_pages_scanned,d_tuples_deleted,pages_per_pass,tuples_per_pass,d_wal_records,d_wal_bytes
+2026-04-26 01:44:36+03,2026-04-26 01:45:22+03,public,pgbench_accounts,62,6852,70468,110.5,1137,7740,887166

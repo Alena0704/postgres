@@ -1,0 +1,7 @@
+phase_id,mode,phase_name,description,started_at,ended_at,sample_at_start,sample_at_end
+26,fixed,B-middle,cost_delay=100ms/limit=10 + middle DELETE,2026-04-26 11:36:21+03,2026-04-26 11:37:51+03,183,189
+27,fixed,C-border,per-table autovacuum starved + border DELETE,2026-04-26 11:38:06+03,2026-04-26 11:39:37+03,190,196
+28,fixed,D-sparse,per-table freeze postponed + sparse DELETE,2026-04-26 11:39:52+03,2026-04-26 11:41:23+03,197,203
+34,fixed,F-xidburn,autovacuum_freeze_max_age=100000 + xid burn,2026-04-26 11:57:19+03,2026-04-26 11:58:53+03,239,245
+37,fixed,A-sparse,maintenance_work_mem=64kB + sparse DELETE,2026-04-26 14:02:11+03,2026-04-26 14:03:45+03,277,283
+38,fixed,E-sparse,per-table vacuum_index_cleanup=off + sparse,2026-04-26 14:04:14+03,2026-04-26 14:05:48+03,284,290

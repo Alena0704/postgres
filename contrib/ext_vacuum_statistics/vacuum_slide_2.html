@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics &amp; pgstat Framework</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; padding: 40px;
+  }
+
+  h1 { font-size: 28px; text-align: center; margin-bottom: 6px; }
+  .subtitle { font-size: 16px; color: #94a3b8; text-align: center; margin-bottom: 40px; }
+
+  /* ── main layout: 4 columns + arrows ── */
+  .diagram {
+    display: flex; align-items: stretch; gap: 0;
+    max-width: 1200px; width: 100%;
+  }
+
+  /* ── big rounded rectangle ── */
+  .phase {
+    flex: 1; border-radius: 18px; padding: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .phase-head {
+    padding: 14px 20px; font-size: 16px; font-weight: 700;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .phase-body {
+    padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 0;
+    flex: 1;
+  }
+
+  /* ── step row ── */
+  .step {
+    padding: 10px 14px; font-size: 16px; line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-icon { font-size: 16px; flex-shrink: 0; width: 22px; text-align: center; margin-top: 1px; }
+  .step-text { flex: 1; }
+  .step-text strong { font-weight: 700; }
+  .step-sub { font-size: 14px; color: #94a3b8; margin-top: 2px; }
+  code {
+    font-size: 14px; background: rgba(0,0,0,.3); padding: 1px 5px;
+    border-radius: 3px; color: #7dd3fc; font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ── highlighted report box ── */
+  .report {
+    margin: 8px 14px 14px; padding: 12px 16px;
+    border-radius: 12px; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+    border: 2px solid;
+  }
+
+  /* ── horizontal arrow ── */
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 48px; flex-shrink: 0;
+  }
+  .arrow svg { display: block; }
+
+  /* ── colors ── */
+  .c-hook { background: rgba(168,85,247,.06); border: 2px solid #a855f7; }
+  .c-hook .phase-head { background: rgba(168,85,247,.12); color: #a855f7; }
+
+  .c-shm  { background: rgba(74,222,128,.06); border: 2px solid #4ade80; }
+  .c-shm .phase-head { background: rgba(74,222,128,.12); color: #4ade80; }
+
+  .c-disk { background: rgba(245,158,11,.06); border: 2px solid #f59e0b; }
+  .c-disk .phase-head { background: rgba(245,158,11,.12); color: #f59e0b; }
+
+  .c-sql  { background: rgba(251,113,133,.06); border: 2px solid #fb7185; }
+  .c-sql .phase-head { background: rgba(251,113,133,.12); color: #fb7185; }
+
+  .r-green { background: rgba(74,222,128,.08); border-color: #4ade80; color: #4ade80; }
+  .r-amber { background: rgba(245,158,11,.08); border-color: #f59e0b; color: #f59e0b; }
+
+  /* ── footnote ── */
+  .footnote {
+    margin-top: 28px; font-size: 16px; color: #f59e0b; text-align: center;
+    padding: 10px 24px; background: rgba(245,158,11,.06);
+    border: 1px dashed rgba(245,158,11,.3); border-radius: 10px;
+    max-width: 1200px; width: 100%;
+  }
+</style>
+</head>
+<body>
+
+<h1>About ext_vacuum_statistics Extension</h1>
+<p class="subtitle">How vacuum counters flow from the hook through shared memory to SQL views</p>
+
+<div class="diagram">
+
+  <!-- ── 1. Hook receives ── -->
+  <div class="phase c-hook">
+    <div class="phase-head">Collecting Statistics</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4E5;</span>
+        <div class="step-text">
+          <strong>VACUUM calls hook</strong>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F511;</span>
+        <div class="step-text">
+          <strong>Write to cumulative stats hash table</strong>
+          <div class="step-sub">Key: (object OID, database OID, type)</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x2795;</span>
+        <div class="step-text">
+          <strong>Accumulate counters</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 2. Shared memory ── -->
+  <div class="phase c-shm">
+    <div class="phase-head">Storing Statistics</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4BE;</span>
+        <div class="step-text">
+          <strong>Cumulative counters</strong>
+          <div class="step-sub">~232 bytes per tracked object</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4DD;</span>
+        <div class="step-text">
+          <strong>Two custom pgstat kinds</strong>
+          <div class="step-sub">Tables, indexes, databases</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 3. Disk persistence ── -->
+  <div class="phase c-disk">
+    <div class="phase-head">Disk Persistence</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4C0;</span>
+        <div class="step-text">
+          <strong>Auto-flush to pg_stat/</strong>
+          <div class="step-sub">pgstat periodically writes<br>shared memory to disk files</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F504;</span>
+        <div class="step-text">
+          <strong>Reload on startup</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 4. SQL views ── -->
+  <div class="phase c-sql">
+    <div class="phase-head">SQL Views</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4CA;</span>
+        <div class="step-text">
+          <strong>Three views</strong>
+          <div class="step-sub">
+            <code>pg_stats_vacuum_tables</code><br>
+            <code>pg_stats_vacuum_indexes</code><br>
+            <code>pg_stats_vacuum_database</code>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footnote">
+  The extension registers custom pgstat kinds with <code>write_to_file = true</code> and
+  <code>accessed_across_databases = true</code>.
+  Everything else &mdash; shmem allocation, locking, flushing, reload &mdash; is handled by PostgreSQL's pgstat framework.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     LAYER 2: DBA + Filtering + Reset → full flow again
+     ══════════════════════════════════════════════════════════════ -->
+
+<!-- DBA + controls row -->
+<div style="margin-top:56px; max-width:1200px; width:100%; display:flex; align-items:stretch; gap:0;">
+
+  <!-- DBA person -->
+  <div style="flex:0 0 140px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;">
+    <svg width="64" height="64" viewBox="0 0 48 48" fill="none">
+      <circle cx="24" cy="14" r="10" fill="#fb7185" opacity=".7"/>
+      <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="#fb7185" opacity=".5"/>
+    </svg>
+    <span style="font-size:16px; font-weight:700; color:#fb7185;">DBA</span>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- Filtering & Reset in one outer box -->
+  <div style="flex:1; border-radius:18px; border:2px solid #22d3ee; background:rgba(34,211,238,.06); overflow:hidden; display:flex; flex-direction:column;">
+    <div class="phase-head" style="background:rgba(34,211,238,.12); color:#22d3ee;">DBA Controls</div>
+    <div style="display:flex; flex:1; gap:0;">
+
+      <!-- Filtering half -->
+      <div style="flex:1; padding:6px 14px 14px; border-right:1px solid rgba(34,211,238,.2);">
+        <div style="font-size:16px; font-weight:700; color:#22d3ee; margin-bottom:8px;">Filtering (GUCs)</div>
+        <div class="step">
+          <span class="step-icon">&#x2699;</span>
+          <div class="step-text">
+            <strong>What to track</strong>
+            <div class="step-sub">tables / indexes / databases</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4CB;</span>
+          <div class="step-text">
+            <strong>Which counters to collect</strong>
+            <div class="step-sub">buffers, WAL, timing, general</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DD;</span>
+          <div class="step-text">
+            <strong>Whitelist mode</strong>
+            <div class="step-sub">Track only specific tables or databases</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reset half -->
+      <div style="flex:0.5; padding:6px 14px 14px;">
+        <div style="font-size:16px; font-weight:700; color:#fb7185; margin-bottom:8px;">Reset</div>
+        <div class="step">
+          <span class="step-icon">&#x1F5D1;</span>
+          <div class="step-text">
+            <strong>Reset all statistics</strong>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F3AF;</span>
+          <div class="step-text">
+            <strong>Reset per table or database</strong>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- Down arrow pointing to Storing Statistics (2nd box in flow) -->
+<div style="max-width:1200px; width:100%; display:flex;">
+  <!-- offset: 1st phase + arrow = ~calc(25% + 24px + 48px), center of 2nd phase -->
+  <div style="width:calc(25% + 48px + 12.5%); flex-shrink:0;"></div>
+  <div style="display:flex; justify-content:center;">
+    <svg width="24" height="36" viewBox="0 0 24 36">
+      <line x1="12" y1="0" x2="12" y2="26" stroke="#22d3ee" stroke-width="2"/>
+      <polygon points="6,26 18,26 12,36" fill="#22d3ee"/>
+    </svg>
+  </div>
+</div>
+
+<!-- Full flow repeated with filter connection -->
+<div class="diagram" style="max-width:1200px; width:100%;">
+
+  <!-- ── 1. Hook receives ── -->
+  <div class="phase c-hook">
+    <div class="phase-head">Collecting Statistics</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4E5;</span>
+        <div class="step-text">
+          <strong>VACUUM calls hook</strong>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F50E;</span>
+        <div class="step-text">
+          <strong style="color:#22d3ee;">Apply filters</strong>
+          <div class="step-sub">Skip if object/category not tracked</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x2795;</span>
+        <div class="step-text">
+          <strong>Accumulate counters</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 2. Shared memory ── -->
+  <div class="phase c-shm">
+    <div class="phase-head">Storing Statistics</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4BE;</span>
+        <div class="step-text">
+          <strong>Cumulative counters</strong>
+          <div class="step-sub">~232 bytes per tracked object</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4DD;</span>
+        <div class="step-text">
+          <strong>Two custom pgstat kinds</strong>
+          <div class="step-sub">Tables, indexes, databases</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 3. Disk persistence ── -->
+  <div class="phase c-disk">
+    <div class="phase-head">Disk Persistence</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4C0;</span>
+        <div class="step-text">
+          <strong>Auto-flush to pg_stat/</strong>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F504;</span>
+        <div class="step-text">
+          <strong>Reload on startup</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ── 4. SQL views ── -->
+  <div class="phase c-sql">
+    <div class="phase-head">SQL Views</div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4CA;</span>
+        <div class="step-text">
+          <strong>Three views</strong>
+          <div class="step-sub">
+            <code>pg_stats_vacuum_tables</code><br>
+            <code>pg_stats_vacuum_indexes</code><br>
+            <code>pg_stats_vacuum_database</code>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

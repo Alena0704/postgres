@@ -1,0 +1,18 @@
+INFO:  vacuuming "pgbench_evs_del.public.pgbench_accounts"
+INFO:  finished vacuuming "pgbench_evs_del.public.pgbench_accounts": index scans: 1430
+pages: 0 removed, 106527 remain, 106401 scanned (99.88% of total), 0 eagerly scanned
+tuples: 4 removed, 6441824 remain, 0 are dead but not yet removable
+removable cutoff: 235077656, which was 135 XIDs old when operation ended
+new relfrozenxid: 233795876, which is 285010 XIDs ahead of previous value
+new relminmxid: 332, which is 6 MXIDs ahead of previous value
+frozen: 25112 pages from table (23.57% of total) had 1498283 tuples frozen
+visibility map: 86964 pages set all-visible, 81014 pages set all-frozen (0 were all-visible)
+index scan needed: 55902 pages from table (52.48% of total) had 55902 dead item identifiers removed
+index "pgbench_accounts_pkey": pages: 17836 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+I/O timings: read: 450.318 ms, write: 94.427 ms
+avg read rate: 180.267 MB/s, avg write rate: 2.885 MB/s
+buffer usage: 19540146 hits, 6239930 reads, 99871 dirtied
+WAL usage: 126202 records, 92729 full page images, 743120871 bytes, 732445992 full page image bytes, 0 buffers full
+memory usage: dead item storage 100.51 MB accumulated across 1430 resets (limit 0.06 MB each)
+system usage: CPU: user: 266.67 s, system: 2.90 s, elapsed: 270.42 s
+VACUUM

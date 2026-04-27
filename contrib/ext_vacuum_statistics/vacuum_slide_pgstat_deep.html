@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cumulative Statistics Collector: How It Works Inside</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 48px;
+  }
+
+  h1 { font-size: 28px; text-align: center; margin-bottom: 6px; }
+  .subtitle { font-size: 16px; color: #94a3b8; text-align: center; margin-bottom: 48px; }
+  .slide { margin-bottom: 64px; width: 100%; max-width: 1200px; }
+  .stitle {
+    font-size: 16px; font-weight: 700; color: #94a3b8;
+    text-transform: uppercase; letter-spacing: 2px;
+    margin-bottom: 16px;
+  }
+
+  /* ── flow layout ── */
+  .flow { display: flex; align-items: stretch; gap: 0; }
+
+  /* ── box ── */
+  .box {
+    flex: 1; border-radius: 18px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .box-head {
+    padding: 14px 20px; font-size: 16px; font-weight: 700;
+  }
+  .box-body {
+    padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 0; flex: 1;
+  }
+  .step {
+    padding: 10px 14px; font-size: 16px; line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-icon { font-size: 16px; flex-shrink: 0; width: 22px; text-align: center; margin-top: 1px; }
+  .step-text { flex: 1; }
+  .step-text strong { font-weight: 700; }
+  .step-sub { font-size: 14px; color: #94a3b8; margin-top: 2px; }
+  code {
+    font-size: 14px; background: rgba(0,0,0,.3); padding: 1px 5px;
+    border-radius: 3px; color: #7dd3fc; font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ── arrow ── */
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 48px; flex-shrink: 0;
+  }
+  .arrow svg { display: block; }
+
+  /* ── down arrow ── */
+  .darrow {
+    display: flex; justify-content: center; padding: 8px 0;
+  }
+
+  /* ── colors ── */
+  .c-blue  { background: rgba(56,189,248,.06); border: 2px solid #38bdf8; }
+  .c-blue .box-head { background: rgba(56,189,248,.12); color: #38bdf8; }
+  .c-green { background: rgba(74,222,128,.06); border: 2px solid #4ade80; }
+  .c-green .box-head { background: rgba(74,222,128,.12); color: #4ade80; }
+  .c-amber { background: rgba(245,158,11,.06); border: 2px solid #f59e0b; }
+  .c-amber .box-head { background: rgba(245,158,11,.12); color: #f59e0b; }
+  .c-purple { background: rgba(168,85,247,.06); border: 2px solid #a855f7; }
+  .c-purple .box-head { background: rgba(168,85,247,.12); color: #a855f7; }
+  .c-rose { background: rgba(251,113,133,.06); border: 2px solid #fb7185; }
+  .c-rose .box-head { background: rgba(251,113,133,.12); color: #fb7185; }
+  .c-teal { background: rgba(45,212,191,.06); border: 2px solid #2dd4bf; }
+  .c-teal .box-head { background: rgba(45,212,191,.12); color: #2dd4bf; }
+
+  /* ── highlight report ── */
+  .report {
+    margin: 8px 14px 14px; padding: 12px 16px;
+    border-radius: 12px; font-size: 16px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+    border: 2px solid;
+  }
+  .r-green { background: rgba(74,222,128,.08); border-color: #4ade80; color: #4ade80; }
+  .r-amber { background: rgba(245,158,11,.08); border-color: #f59e0b; color: #f59e0b; }
+
+  /* ── footnote ── */
+  .footnote {
+    margin-top: 20px; font-size: 16px; color: #f59e0b; text-align: center;
+    padding: 10px 24px; background: rgba(245,158,11,.06);
+    border: 1px dashed rgba(245,158,11,.3); border-radius: 10px;
+    max-width: 1200px; width: 100%;
+  }
+  .note-plain {
+    margin-top: 16px; font-size: 14px; color: #94a3b8; text-align: center;
+    max-width: 1200px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Cumulative Statistics Collector: Inside</h1>
+<p class="subtitle">How backend-local counters get flushed to the shared hash table and when</p>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 1: Write path — local → pending → shared
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <div class="stitle">Write Path: Backend &rarr; Pending List &rarr; Shared Memory</div>
+
+  <div class="flow">
+
+    <!-- Backend local -->
+    <div class="box c-blue">
+      <div class="box-head">Backend-Local Counters</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x270F;</span>
+          <div class="step-text">
+            <strong>Each operation increments local struct</strong>
+            <div class="step-sub">INSERT &rarr; <code>tuples_inserted++</code><br>
+            SELECT &rarr; <code>numscans++</code>, <code>blocks_hit++</code></div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DD;</span>
+          <div class="step-text">
+            <strong><code>PgStat_TableStatus</code></strong>
+            <div class="step-sub">One per table this backend touched.<br>
+            Lives in backend-local memory.</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DA;</span>
+          <div class="step-text">
+            <strong>Transaction-aware</strong>
+            <div class="step-sub">Stack of <code>PgStat_TableXactStatus</code>:<br>
+            on COMMIT &rarr; deltas finalized,<br>
+            on ABORT &rarr; deltas discarded.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Pending list -->
+    <div class="box c-amber">
+      <div class="box-head">Pending List</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4CB;</span>
+          <div class="step-text">
+            <strong><code>pgStatPending</code> (dlist)</strong>
+            <div class="step-sub">Linked list of all entries<br>
+            with unflushed counters in this backend</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4E6;</span>
+          <div class="step-text">
+            <strong><code>PgStat_EntryRef</code></strong>
+            <div class="step-sub">Points to both:<br>
+            &bull; local <code>pending</code> data<br>
+            &bull; shared memory entry</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Flush -->
+    <div class="box c-green">
+      <div class="box-head">Flush to Shared Memory</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F512;</span>
+          <div class="step-text">
+            <strong>Lock per-entry LWLock</strong>
+            <div class="step-sub">Each shared entry has its own lock.<br>
+            If busy &rarr; skip, retry later.</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text">
+            <strong>Add local deltas to shared totals</strong>
+            <div class="step-sub"><code>shared.field += local.field</code><br>
+            Unlock. Remove from pending list.</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4E8;</span>
+          <div class="step-text">
+            <strong>Cascade to database stats</strong>
+            <div class="step-sub">Relation flush also creates<br>
+            a pending database-level entry</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Shared dshash -->
+    <div class="box c-purple">
+      <div class="box-head">Shared dshash Table</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F5C4;</span>
+          <div class="step-text">
+            <strong>Dynamic shared hash</strong>
+            <div class="step-sub">Key: (kind, dboid, objid)<br>
+            Grows as new objects appear</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x26A1;</span>
+          <div class="step-text">
+            <strong>Two-level cache</strong>
+            <div class="step-sub">Backend-local ref hash &rarr; shared dshash.<br>
+            First lookup hits shared, then cached.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 2: When does flush happen?
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <div class="stitle">When Does Flush Happen?</div>
+
+  <div class="flow">
+
+    <!-- Trigger -->
+    <div class="box c-blue">
+      <div class="box-head">Trigger</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F501;</span>
+          <div class="step-text">
+            <strong><code>pgstat_report_stat()</code></strong>
+            <div class="step-sub">Called after each transaction<br>in the main query loop</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Throttle -->
+    <div class="box c-amber">
+      <div class="box-head">Throttle</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x23F1;</span>
+          <div class="step-text">
+            <strong>At most once per second</strong>
+            <div class="step-sub"><code>PGSTAT_MIN_INTERVAL = 1000ms</code><br>
+            If less than 1s since last flush &rarr; skip</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x23F0;</span>
+          <div class="step-text">
+            <strong>Force after 60 seconds</strong>
+            <div class="step-sub"><code>PGSTAT_MAX_INTERVAL = 60000ms</code><br>
+            If pending stats older than 60s &rarr; force flush with blocking locks</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Non-blocking -->
+    <div class="box c-green">
+      <div class="box-head">Normal Flush (non-blocking)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F513;</span>
+          <div class="step-text">
+            <strong>Try lock, skip if busy</strong>
+            <div class="step-sub">Iterate pending list.<br>
+            If entry locked by another backend &rarr;<br>
+            skip it, try again next time.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <!-- Forced -->
+    <div class="box c-rose">
+      <div class="box-head">Forced Flush (blocking)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F512;</span>
+          <div class="step-text">
+            <strong>Wait for lock</strong>
+            <div class="step-sub">After 60s or on shutdown:<br>
+            block until lock acquired.<br>
+            Guarantees all stats flushed.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footnote">
+    Stats are NOT flushed every second. They are throttled to <strong>at most</strong> once per second,
+    but only when there are pending entries. Idle backends don't flush.
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 3: Key functions
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <div class="stitle">Key Functions</div>
+
+  <div class="flow" style="gap:16px;">
+
+    <div class="box c-blue">
+      <div class="box-head" style="font-size:14px;">Accumulate (per operation)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x270F;</span>
+          <div class="step-text">
+            <strong><code>pgstat_count_heap_insert()</code></strong>
+            <div class="step-sub">...update(), delete(), scan()</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DD;</span>
+          <div class="step-text">
+            <strong><code>pgstat_prep_pending_entry()</code></strong>
+            <div class="step-sub">Get or create pending entry,<br>add to pending list</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-amber">
+      <div class="box-head" style="font-size:14px;">Flush (periodic)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F501;</span>
+          <div class="step-text">
+            <strong><code>pgstat_report_stat()</code></strong>
+            <div class="step-sub">Main entry point, checks timing</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4E4;</span>
+          <div class="step-text">
+            <strong><code>pgstat_flush_pending_entries()</code></strong>
+            <div class="step-sub">Iterates pending list,<br>calls flush callback per kind</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text">
+            <strong><code>flush_pending_cb()</code></strong>
+            <div class="step-sub">Kind-specific: lock, add deltas, unlock</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-green">
+      <div class="box-head" style="font-size:14px;">Shared Memory Access</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F50D;</span>
+          <div class="step-text">
+            <strong><code>pgstat_get_entry_ref()</code></strong>
+            <div class="step-sub">Find or create entry in dshash,<br>two-level cache</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F512;</span>
+          <div class="step-text">
+            <strong><code>pgstat_lock_entry()</code></strong>
+            <div class="step-sub">Per-entry LWLock,<br>supports nowait mode</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4CA;</span>
+          <div class="step-text">
+            <strong><code>pgstat_fetch_entry()</code></strong>
+            <div class="step-sub">Read-only snapshot for SQL views</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-purple">
+      <div class="box-head" style="font-size:14px;">Transaction Hooks</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x2705;</span>
+          <div class="step-text">
+            <strong><code>AtEOXact_PgStat()</code></strong>
+            <div class="step-sub">On COMMIT: finalize deltas</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text">
+            <strong><code>AtEOXact_PgStat()</code></strong>
+            <div class="step-sub">On ABORT: discard deltas</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DA;</span>
+          <div class="step-text">
+            <strong><code>AtEOSubXact_PgStat()</code></strong>
+            <div class="step-sub">Subtransaction: propagate up<br>or discard per nesting level</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 4: ext_vacuum_statistics difference
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <div class="stitle">How ext_vacuum_statistics Differs</div>
+
+  <div class="flow">
+
+    <div class="box c-teal">
+      <div class="box-head">Built-in Relation Stats</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4DD;</span>
+          <div class="step-text">
+            <strong>Local pending &rarr; periodic flush</strong>
+            <div class="step-sub">Counters accumulate in backend,<br>
+            flushed every ~1s via pending list</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F512;</span>
+          <div class="step-text">
+            <strong>Non-blocking by default</strong>
+            <div class="step-sub">Skip if lock busy, retry next time</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F4DA;</span>
+          <div class="step-text">
+            <strong>Transaction-aware</strong>
+            <div class="step-sub">ABORT discards insert/update/delete counts</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="width:24px; flex-shrink:0;"></div>
+
+    <div class="box c-amber">
+      <div class="box-head">ext_vacuum_statistics</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x26A1;</span>
+          <div class="step-text">
+            <strong>Direct write to shared memory</strong>
+            <div class="step-sub">No pending list. Hook writes to<br>
+            shared entry immediately via<br>
+            <code>pgstat_get_entry_ref_locked()</code></div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F512;</span>
+          <div class="step-text">
+            <strong>Always locks (blocking)</strong>
+            <div class="step-sub">Vacuum hook can afford to wait</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x1F6AB;</span>
+          <div class="step-text">
+            <strong>Not transaction-aware</strong>
+            <div class="step-sub">Vacuum always commits its work.<br>
+            No pending_size, no flush_pending_cb.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note-plain">
+    The extension skips the pending list entirely &mdash; it writes directly to shared memory from the vacuum hook.
+    This is simpler and safe because vacuum operations always commit.
+  </div>
+</div>
+
+</body>
+</html>

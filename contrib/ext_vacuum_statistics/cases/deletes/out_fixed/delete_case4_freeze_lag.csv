@@ -1,0 +1,6 @@
+t_from,t_to,schemaname,relname,d_pages_scanned,d_tuples_deleted,d_pages_removed,d_tuples_frozen,d_vm_frozen,d_vm_visible_frozen,d_wal_bytes
+2026-04-26 11:36:21+03,2026-04-26 11:36:36+03,public,pgbench_accounts,7242,9010,0,0,0,0,432287
+2026-04-26 11:38:06+03,2026-04-26 11:38:22+03,public,pgbench_accounts,27680,88032,0,0,0,177,3368197
+2026-04-26 11:38:22+03,2026-04-26 11:38:38+03,public,pgbench_accounts,29116,36889,0,0,0,0,3071465
+2026-04-26 11:38:53+03,2026-04-26 11:39:09+03,public,pgbench_accounts,22074,7688,0,0,0,500,1653901
+2026-04-26 11:58:38+03,2026-04-26 11:58:53+03,public,pgbench_accounts,81968,50000,0,0,0,50000,46798758

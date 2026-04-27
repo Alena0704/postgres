@@ -1,0 +1,1 @@
+t_from,t_to,schemaname,relname,d_idx_passes,d_pages_scanned,d_tuples_deleted,pages_per_pass,tuples_per_pass,d_wal_records,d_wal_bytes

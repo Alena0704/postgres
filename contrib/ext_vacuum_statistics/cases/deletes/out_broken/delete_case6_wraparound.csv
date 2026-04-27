@@ -1,0 +1,1 @@
+t_from,t_to,schemaname,relname,d_failsafe,d_tuples_frozen,d_vm_frozen,d_idx_tuples_deleted,d_idx_pages_deleted,d_idx_blks_dirty,signal

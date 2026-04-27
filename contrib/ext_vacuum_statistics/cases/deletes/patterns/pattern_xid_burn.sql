@@ -1,0 +1,14 @@
+-- pattern: XID burner (driver for case F — wraparound failsafe)
+--
+-- Every transaction calls txid_current(), which forces an XID assignment.
+-- With pgbench -c 32 -T <duration> this consumes XIDs at ~50–200k/sec on
+-- a laptop.  Combined with autovacuum_freeze_max_age=100000 (and
+-- vacuum_failsafe_age=80000), the cluster crosses the failsafe threshold
+-- within seconds and emergency vacuums fire — that is what bumps
+-- wraparound_failsafe_count in ext_vacuum_statistics.
+--
+-- This pattern intentionally does NOT touch any user table.  All the
+-- vacuum signal we want to see (failsafe count, tuples_frozen,
+-- vm_new_frozen_pages, skipped index cleanup) is a consequence of the
+-- *cluster-wide* freeze pressure, not of new heap dead tuples.
+SELECT txid_current();

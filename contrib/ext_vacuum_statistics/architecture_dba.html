@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — DBA Guide</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --blue: #3b82f6; --purple: #a855f7; --cyan: #22d3ee;
+    --green: #4ade80; --amber: #f59e0b; --pink: #f472b6;
+    --orange: #fb923c; --red: #ef4444; --teal: #2dd4bf;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+  .nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: center; align-items: center; gap: 0;
+    background: #020617; border-bottom: 1px solid var(--bg3);
+  }
+  .nav a {
+    padding: 16px 28px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-decoration: none; border-bottom: 3px solid transparent;
+    transition: all .2s; text-align: center; line-height: 1.3;
+  }
+  .nav a:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .nav a.active { color: #fff; border-bottom-color: var(--amber); }
+  .nav a small { display: block; font-weight: 400; font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+  .content { padding: 40px 32px 80px; max-width: 1200px; margin: 0 auto; }
+
+  h1 { font-size: 32px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; color: #fff; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 16px; margin-bottom: 8px; }
+  p, li { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .lead { font-size: 16px; color: var(--muted); margin-bottom: 32px; line-height: 1.6; }
+
+  .card {
+    background: var(--bg2); border: 1px solid var(--bg3); border-radius: 16px;
+    padding: 28px; margin-bottom: 20px;
+  }
+  .card-accent { border-left: 4px solid; }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card ul { padding-left: 20px; margin-top: 8px; }
+  .card li { margin-bottom: 4px; }
+  code {
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 2px 7px;
+    border-radius: 4px; color: #7dd3fc; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 2px 10px;
+    border-radius: 20px; font-weight: 600; margin-right: 6px;
+  }
+  .tag-blue   { background: rgba(59,130,246,.2); color: var(--blue); }
+  .tag-green  { background: rgba(74,222,128,.2); color: var(--green); }
+  .tag-amber  { background: rgba(245,158,11,.2); color: var(--amber); }
+  .tag-purple { background: rgba(168,85,247,.2); color: var(--purple); }
+  .tag-cyan   { background: rgba(34,211,238,.2); color: var(--cyan); }
+  .tag-pink   { background: rgba(244,114,182,.2); color: var(--pink); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  .callout {
+    background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout strong { color: var(--cyan); }
+  .callout-warn {
+    background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout-warn strong { color: var(--amber); }
+  .sep { border: none; border-top: 1px solid var(--bg3); margin: 40px 0; }
+
+  .cfg-table {
+    width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px;
+  }
+  .cfg-table th {
+    text-align: left; padding: 10px 14px; background: rgba(0,0,0,.3);
+    color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase;
+    letter-spacing: 1px; border-bottom: 1px solid var(--bg3);
+  }
+  .cfg-table td {
+    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.05); vertical-align: top;
+  }
+  .cfg-table tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* diagram */
+  .dia { text-align: center; margin: 32px auto; max-width: 1000px; }
+  .dia-row { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  .dia-box {
+    border-radius: 12px; padding: 14px 18px; text-align: center;
+    min-width: 160px; font-size: 13px; line-height: 1.5;
+  }
+  .dia-box h4 { font-size: 13px; margin-bottom: 4px; }
+  .dia-box p  { font-size: 11px; color: var(--muted); }
+
+  .d-store{ background: #1c3322; border: 2px solid var(--green); }
+  .d-out  { background: #3a2710; border: 2px solid var(--amber); }
+  .d-user { background: #3b1530; border: 2px solid var(--pink); }
+  .d-file { background: #1a2733; border: 2px dotted var(--dim); }
+  .d-guc  { background: #2d2215; border: 2px dashed var(--orange); }
+
+  .arrow {
+    display: flex; justify-content: center; align-items: center;
+    height: 40px; position: relative;
+  }
+  .arrow::before { content: ''; width: 2px; height: 20px; background: var(--dim); }
+  .arrow::after {
+    content: ''; position: absolute; bottom: 4px;
+    border-left: 7px solid transparent; border-right: 7px solid transparent;
+    border-top: 9px solid var(--dim);
+  }
+  .arrow-label {
+    position: absolute; font-size: 11px; color: var(--muted);
+    right: calc(50% - 180px); white-space: nowrap;
+  }
+  .person-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .person-label { font-size: 13px; font-weight: 600; }
+
+  /* SQL code block */
+  .sql-block {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 14px 18px;
+    border-radius: 8px; margin: 8px 0; line-height: 1.7; color: #7dd3fc;
+    overflow-x: auto;
+  }
+  .sql-block .comment { color: var(--dim); }
+  .sql-block .kw { color: var(--cyan); }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="architecture_overview.html">
+    Overview
+    <small>for everyone</small>
+  </a>
+  <a class="active" href="architecture_dba.html">
+    DBA Guide
+    <small>configuration &amp; usage</small>
+  </a>
+  <a href="architecture_internals.html">
+    Internals
+    <small>for developers</small>
+  </a>
+  <a href="architecture_vacuum_core.html">
+    VACUUM Core
+    <small>how vacuum &amp; stats work</small>
+  </a>
+</div>
+
+<div class="content">
+
+  <h1>DBA Guide: Configuration &amp; Usage</h1>
+  <p class="lead">
+    Everything a DBA needs to install, configure, query, and manage the extension.
+    All interactions are through SQL and postgresql.conf &mdash; no C code needed.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════
+       Installation
+       ══════════════════════════════════════════════════════ -->
+  <h2>Installation</h2>
+  <div class="card">
+    <h3>Step-by-step</h3>
+    <div class="sql-block">
+      <span class="comment">-- 1. Add to postgresql.conf (requires restart)</span><br>
+      shared_preload_libraries = 'ext_vacuum_statistics'<br><br>
+      <span class="comment">-- 2. Restart PostgreSQL</span><br>
+      <span class="comment">-- pg_ctl restart -D $PGDATA</span><br><br>
+      <span class="comment">-- 3. Create the extension in each database you want views in</span><br>
+      <span class="kw">CREATE EXTENSION</span> ext_vacuum_statistics;
+    </div>
+    <div class="callout">
+      <strong>Note:</strong> The extension must be in <code>shared_preload_libraries</code> because it
+      allocates shared memory at server start. Statistics collection works cluster-wide even if you only
+      create the extension in one database &mdash; but you need the extension installed in a database to
+      access the views from that database.
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Settings
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Configuration Parameters (GUC)</h2>
+  <p>All settings live under the <code>vacuum_statistics.*</code> namespace.
+  Change them with <code>ALTER SYSTEM SET</code> or directly in <code>postgresql.conf</code>.
+  All are PGC_SUSET (superuser-only, no restart required).</p>
+
+  <div class="card" style="overflow-x:auto;">
+    <table class="cfg-table">
+      <thead>
+        <tr><th>Parameter</th><th>Default</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>vacuum_statistics.enabled</code></td>
+          <td><code>on</code></td>
+          <td>
+            <strong>Master switch.</strong> When <code>off</code>, no statistics are collected.
+            Existing stats remain until you reset them. Turn it off temporarily to reduce
+            overhead during heavy maintenance windows.
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.object_types</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            <strong>What level of stats to collect:</strong><br>
+            <code>'all'</code> &mdash; per-table + per-index + per-database aggregates<br>
+            <code>'relations'</code> &mdash; only per-table &amp; per-index (skip DB aggregates)<br>
+            <code>'databases'</code> &mdash; only per-database aggregates (skip individual objects)
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_relations</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            <strong>Filter by relation kind:</strong><br>
+            <code>'all'</code> &mdash; track both user and system tables<br>
+            <code>'user'</code> &mdash; only user-created tables (skip pg_catalog)<br>
+            <code>'system'</code> &mdash; only system catalog tables
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.collect</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            <strong>Which counter categories to accumulate.</strong> Comma-separated list:<br>
+            <span class="tag tag-blue">buffers</span> blks_read, blks_hit, blks_dirtied, blks_written, I/O timing<br>
+            <span class="tag tag-green">wal</span> wal_records, wal_fpi, wal_bytes<br>
+            <span class="tag tag-amber">general</span> tuples, pages, VM, failsafe, index_vacuum_count<br>
+            <span class="tag tag-purple">timing</span> total_time, delay_time<br><br>
+            Example: <code>'buffers,timing'</code> &mdash; collect only I/O and timing metrics
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_relations_from_list</code></td>
+          <td><code>off</code></td>
+          <td>
+            <strong>Whitelist mode for relations.</strong> When <code>on</code>, only tables/indexes
+            explicitly added via <code>add_track_relation()</code> are tracked. All others are ignored.
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_databases_from_list</code></td>
+          <td><code>off</code></td>
+          <td>
+            <strong>Whitelist mode for databases.</strong> When <code>on</code>, only databases
+            explicitly added via <code>add_track_database()</code> produce stats.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- DBA + Settings diagram -->
+  <div class="dia" style="margin-top:24px;">
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:180px;">
+        <div class="person-wrap">
+          <svg width="52" height="52" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA</span>
+        </div>
+      </div>
+    </div>
+    <div class="arrow">
+      <span class="arrow-label">ALTER SYSTEM SET / postgresql.conf</span>
+    </div>
+    <div class="dia-row" style="gap:12px;">
+      <div class="dia-box d-guc" style="flex:1; max-width:220px;">
+        <h4 style="color:var(--orange);">enabled</h4>
+        <p>on / off</p>
+      </div>
+      <div class="dia-box d-guc" style="flex:1; max-width:220px;">
+        <h4 style="color:var(--orange);">object_types</h4>
+        <p>all / relations / databases</p>
+      </div>
+      <div class="dia-box d-guc" style="flex:1; max-width:220px;">
+        <h4 style="color:var(--orange);">track_relations</h4>
+        <p>all / user / system</p>
+      </div>
+      <div class="dia-box d-guc" style="flex:1; max-width:220px;">
+        <h4 style="color:var(--orange);">collect</h4>
+        <p>buffers, wal, general, timing</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:400px;">
+        <h4 style="color:var(--green);">Extension applies settings at runtime</h4>
+        <p>No restart needed. Next VACUUM uses new settings immediately.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Whitelist management
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Whitelist Management</h2>
+  <p>For large clusters, you may not want to track every table. Use whitelist mode to track only specific objects.</p>
+
+  <div class="grid2">
+    <div class="card card-accent" style="border-left-color: var(--cyan);">
+      <h3 style="color:var(--cyan);">Track Specific Databases</h3>
+      <div class="sql-block">
+        <span class="comment">-- Enable whitelist mode</span><br>
+        <span class="kw">ALTER SYSTEM SET</span><br>
+        &nbsp;&nbsp;vacuum_statistics.track_databases_from_list = on;<br>
+        <span class="kw">SELECT</span> pg_reload_conf();<br><br>
+        <span class="comment">-- Add a database to track</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics.add_track_database(<br>
+        &nbsp;&nbsp;oid) <span class="kw">FROM</span> pg_database<br>
+        &nbsp;&nbsp;<span class="kw">WHERE</span> datname = 'production';<br><br>
+        <span class="comment">-- Remove from tracking</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics.remove_track_database(<br>
+        &nbsp;&nbsp;oid) <span class="kw">FROM</span> pg_database<br>
+        &nbsp;&nbsp;<span class="kw">WHERE</span> datname = 'production';
+      </div>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--cyan);">
+      <h3 style="color:var(--cyan);">Track Specific Tables/Indexes</h3>
+      <div class="sql-block">
+        <span class="comment">-- Enable whitelist mode</span><br>
+        <span class="kw">ALTER SYSTEM SET</span><br>
+        &nbsp;&nbsp;vacuum_statistics.track_relations_from_list = on;<br>
+        <span class="kw">SELECT</span> pg_reload_conf();<br><br>
+        <span class="comment">-- Add a table to track</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics.add_track_relation(<br>
+        &nbsp;&nbsp;(SELECT oid FROM pg_database<br>
+        &nbsp;&nbsp;&nbsp;WHERE datname = current_database()),<br>
+        &nbsp;&nbsp;'my_table'::regclass::oid<br>
+        );<br><br>
+        <span class="comment">-- View current track list</span><br>
+        <span class="kw">SELECT</span> * <span class="kw">FROM</span><br>
+        &nbsp;&nbsp;ext_vacuum_statistics.track_list();
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Persistence:</strong> The whitelist is saved to a file on disk
+    (<code>pg_stat/ext_vacuum_statistics_track.oid</code>) and survives restarts.
+    When a tracked table or database is dropped, the entry is automatically cleaned up.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Querying Statistics
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Querying Statistics</h2>
+
+  <div class="grid3">
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Per-Table Statistics</h3>
+      <div class="sql-block" style="font-size:11px;">
+        <span class="kw">SELECT</span> relname,<br>
+        &nbsp;&nbsp;total_blks_read,<br>
+        &nbsp;&nbsp;total_blks_hit,<br>
+        &nbsp;&nbsp;pages_scanned,<br>
+        &nbsp;&nbsp;tuples_deleted,<br>
+        &nbsp;&nbsp;tuples_frozen,<br>
+        &nbsp;&nbsp;total_time<br>
+        <span class="kw">FROM</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.pg_stats_vacuum_tables<br>
+        <span class="kw">ORDER BY</span> total_time <span class="kw">DESC</span>;
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        All buffer I/O, WAL, timing, pages_scanned, pages_removed, VM updates,
+        tuples frozen/deleted, index vacuum count, missed dead tuples.
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Per-Index Statistics</h3>
+      <div class="sql-block" style="font-size:11px;">
+        <span class="kw">SELECT</span> indexrelname,<br>
+        &nbsp;&nbsp;total_blks_read,<br>
+        &nbsp;&nbsp;tuples_deleted,<br>
+        &nbsp;&nbsp;pages_deleted,<br>
+        &nbsp;&nbsp;total_time<br>
+        <span class="kw">FROM</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.pg_stats_vacuum_indexes<br>
+        <span class="kw">ORDER BY</span> total_time <span class="kw">DESC</span>;
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        Buffer I/O, WAL, timing, tuples deleted, pages deleted.
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Per-Database Statistics</h3>
+      <div class="sql-block" style="font-size:11px;">
+        <span class="kw">SELECT</span> dbname,<br>
+        &nbsp;&nbsp;db_blks_read,<br>
+        &nbsp;&nbsp;db_wal_bytes,<br>
+        &nbsp;&nbsp;db_total_time,<br>
+        &nbsp;&nbsp;interrupts_count<br>
+        <span class="kw">FROM</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.pg_stats_vacuum_database;
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        Aggregated across all tables: buffer I/O, WAL, timing, failsafe &amp; interrupt counts.
+      </p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Admin Operations
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Administrative Operations</h2>
+
+  <div class="grid2">
+    <div class="card card-accent" style="border-left-color: var(--pink);">
+      <h3 style="color:var(--pink); font-size:14px;">Reset Statistics</h3>
+      <div class="sql-block">
+        <span class="comment">-- Reset ALL statistics</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.vacuum_statistics_reset();<br><br>
+        <span class="comment">-- Reset one table (type: 0=table, 1=index)</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.extvac_reset_entry(<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;dboid, relid, type);<br><br>
+        <span class="comment">-- Reset one database</span><br>
+        <span class="kw">SELECT</span> ext_vacuum_statistics<br>
+        &nbsp;&nbsp;.extvac_reset_db_entry(dboid);
+      </div>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--teal);">
+      <h3 style="color:var(--teal); font-size:14px;">Check Memory Usage</h3>
+      <div class="sql-block">
+        <span class="comment">-- How much shared memory used</span><br>
+        <span class="kw">SELECT</span><br>
+        &nbsp;&nbsp;pg_size_pretty(<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;ext_vacuum_statistics<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;.shared_memory_size()<br>
+        &nbsp;&nbsp;) <span class="kw">AS</span> mem_used;
+      </div>
+      <p style="margin-top:12px; font-size:12px; color:var(--muted);">
+        Each tracked object uses ~232 bytes.<br>
+        Example: 1000 tables + 2000 indexes = ~700 KB.
+      </p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Persistence
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Statistics Persistence Across Restarts</h2>
+  <p>The extension uses PostgreSQL's pgstat framework to persist statistics to disk.</p>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:180px;">
+        <div class="person-wrap">
+          <svg width="52" height="52" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA</span>
+          <p style="font-size:11px; color:var(--muted);">VACUUM runs, stats accumulate over days/weeks</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:380px;">
+        <h4 style="color:var(--green);">Shared Memory</h4>
+        <p>Live cumulative counters. Fast access for all backends.<br>
+        This is the primary storage while the server is running.</p>
+      </div>
+    </div>
+
+    <div class="dia-row" style="margin-top: 8px; gap:80px;">
+      <div style="display:flex; flex-direction:column; align-items:center;">
+        <div class="arrow" style="height:30px;"></div>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">periodic auto-flush</div>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center;">
+        <div class="arrow" style="height:30px;"></div>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">on add/remove</div>
+      </div>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-file" style="min-width:220px;">
+        <h4 style="color:var(--dim);">pg_stat/ directory</h4>
+        <p>Stats files auto-managed by pgstat.<br>Loaded on startup automatically.</p>
+      </div>
+      <div class="dia-box d-file" style="min-width:220px;">
+        <h4 style="color:var(--dim);">Track list file</h4>
+        <p>ext_vacuum_statistics_track.oid<br>Whitelist saved to disk.</p>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label">Server restart: files loaded back</span>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:380px;">
+        <h4 style="color:var(--green);">Shared Memory (restored)</h4>
+        <p>All stats are back. DBA sees continuous history.<br>
+        No data loss on clean restarts.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout-warn">
+    <strong>After a crash:</strong> Some recently accumulated stats may be lost &mdash;
+    the pgstat framework flushes periodically, not on every update.
+    This is the same behavior as PostgreSQL's built-in statistics
+    (<code>pg_stat_user_tables</code>, etc.).
+  </div>
+
+</div>
+</body>
+</html>

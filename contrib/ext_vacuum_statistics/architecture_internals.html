@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — Developer Internals</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --blue: #3b82f6; --purple: #a855f7; --cyan: #22d3ee;
+    --green: #4ade80; --amber: #f59e0b; --pink: #f472b6;
+    --orange: #fb923c; --red: #ef4444; --teal: #2dd4bf;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+  .nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: center; align-items: center; gap: 0;
+    background: #020617; border-bottom: 1px solid var(--bg3);
+  }
+  .nav a {
+    padding: 16px 28px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-decoration: none; border-bottom: 3px solid transparent;
+    transition: all .2s; text-align: center; line-height: 1.3;
+  }
+  .nav a:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .nav a.active { color: #fff; border-bottom-color: var(--purple); }
+  .nav a small { display: block; font-weight: 400; font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+  .content { padding: 40px 32px 80px; max-width: 1200px; margin: 0 auto; }
+
+  h1 { font-size: 32px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; color: #fff; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 16px; margin-bottom: 8px; }
+  p, li { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .lead { font-size: 16px; color: var(--muted); margin-bottom: 32px; line-height: 1.6; }
+
+  .card {
+    background: var(--bg2); border: 1px solid var(--bg3); border-radius: 16px;
+    padding: 28px; margin-bottom: 20px;
+  }
+  .card-accent { border-left: 4px solid; }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card ul { padding-left: 20px; margin-top: 8px; }
+  .card li { margin-bottom: 4px; }
+  code {
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 2px 7px;
+    border-radius: 4px; color: #7dd3fc; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .sep { border: none; border-top: 1px solid var(--bg3); margin: 40px 0; }
+
+  /* diagram */
+  .dia { text-align: center; margin: 32px auto; max-width: 1000px; }
+  .dia-row { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  .dia-box {
+    border-radius: 12px; padding: 14px 18px; text-align: center;
+    min-width: 160px; font-size: 13px; line-height: 1.5;
+  }
+  .dia-box h4 { font-size: 13px; margin-bottom: 4px; }
+  .dia-box p  { font-size: 11px; color: var(--muted); }
+  .dia-box ul { font-size: 11px; text-align: left; padding-left: 14px; color: var(--muted); }
+
+  .d-pg     { background: #1e3a5f; border: 2px solid var(--blue); }
+  .d-hook   { background: #3b1f5e; border: 2px solid var(--purple); }
+  .d-filter { background: #1a3344; border: 2px solid var(--cyan); }
+  .d-store  { background: #1c3322; border: 2px solid var(--green); }
+  .d-out    { background: #3a2710; border: 2px solid var(--amber); }
+  .d-user   { background: #3b1530; border: 2px solid var(--pink); }
+  .d-file   { background: #1a2733; border: 2px dotted var(--dim); }
+  .d-lock   { background: #2a1a1a; border: 2px solid var(--red); }
+  .d-hash   { background: #1a2a2a; border: 2px solid var(--teal); }
+
+  .arrow {
+    display: flex; justify-content: center; align-items: center;
+    height: 40px; position: relative;
+  }
+  .arrow::before { content: ''; width: 2px; height: 20px; background: var(--dim); }
+  .arrow::after {
+    content: ''; position: absolute; bottom: 4px;
+    border-left: 7px solid transparent; border-right: 7px solid transparent;
+    border-top: 9px solid var(--dim);
+  }
+  .arrow-label {
+    position: absolute; font-size: 11px; color: var(--muted);
+    right: calc(50% - 180px); white-space: nowrap;
+  }
+  .person-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .person-label { font-size: 13px; font-weight: 600; }
+
+  /* memory layout blocks */
+  .mem-block {
+    display: flex; align-items: stretch; border-radius: 8px; overflow: hidden;
+    margin: 8px 0; font-size: 12px;
+  }
+  .mem-block .field {
+    padding: 10px 14px; border-right: 1px solid rgba(0,0,0,.3);
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .mem-block .field:last-child { border-right: none; }
+  .mem-block .field-name { font-weight: 600; font-size: 11px; }
+  .mem-block .field-size { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* code blocks */
+  .code-block {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 16px 18px;
+    border-radius: 8px; margin: 12px 0; line-height: 1.8; overflow-x: auto;
+  }
+
+  .callout {
+    background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout strong { color: var(--cyan); }
+
+  /* file reference */
+  .file-ref {
+    font-size: 11px; color: var(--dim); font-style: italic; margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="architecture_overview.html">
+    Overview
+    <small>for everyone</small>
+  </a>
+  <a href="architecture_dba.html">
+    DBA Guide
+    <small>configuration &amp; usage</small>
+  </a>
+  <a class="active" href="architecture_internals.html">
+    Internals
+    <small>for developers</small>
+  </a>
+  <a href="architecture_vacuum_core.html">
+    VACUUM Core
+    <small>how vacuum &amp; stats work</small>
+  </a>
+</div>
+
+<div class="content">
+
+  <h1>Developer Internals</h1>
+  <p class="lead">
+    Deep dive into implementation: data structures, shared memory layout, locks,
+    hash tables, pgstat framework integration, and the complete data flow
+    with function names and line references.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Initialization
+       ══════════════════════════════════════════════════════ -->
+  <h2>Module: Initialization (<code>_PG_init</code>)</h2>
+  <div class="file-ref">vacuum_statistics.c : _PG_init() ~line 380</div>
+  <div class="card card-accent" style="border-left-color: var(--purple);">
+    <p>On <code>shared_preload_libraries</code> load, <code>_PG_init()</code> registers everything:</p>
+    <ul>
+      <li><strong>6 GUC variables</strong> under <code>vacuum_statistics.*</code> with check/assign hooks for bitmask computation</li>
+      <li><strong>2 custom pgstat kinds:</strong>
+        <code>PGSTAT_KIND_EXTVAC_RELATION</code> (24) &mdash; per-table/index stats,
+        <code>PGSTAT_KIND_EXTVAC_DB</code> (25) &mdash; per-database aggregates</li>
+      <li><strong>3 hooks:</strong>
+        <code>set_report_vacuum_hook</code> &rarr; main data path,
+        <code>shmem_request_hook</code> &rarr; LWLock tranche,
+        <code>object_access_hook</code> &rarr; cleanup on DROP</li>
+      <li><code>MarkGUCPrefixReserved("vacuum_statistics")</code></li>
+    </ul>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Hook & Filtering Pipeline
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Hook Entry &amp; Filtering Pipeline</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-pg" style="min-width:540px;">
+        <h4 style="color:var(--blue);">pgstat_report_vacuum() &mdash; PostgreSQL Core</h4>
+        <p>Calls <code>set_report_vacuum_hook(tableoid, shared, &amp;counts)</code><br>
+        Passes <code>PgStat_VacuumRelationCounts</code> struct by pointer</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:540px;">
+        <h4 style="color:var(--purple);">pgstat_report_vacuum_extstats(tableoid, shared, params)</h4>
+        <p><code>dboid = shared ? InvalidOid : MyDatabaseId</code><br>
+        Chains to <code>prev_report_vacuum_hook</code> if set. Calls filtering functions below.</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="dia-row" style="gap:12px;">
+      <div class="dia-box d-filter" style="flex:1; max-width:420px;">
+        <h4 style="color:var(--cyan);">evs_should_track_relation_statistics(dboid, reloid)</h4>
+        <ul>
+          <li><code>evs_enabled</code> check (master switch)</li>
+          <li><code>evs_track_bits & EVS_TRACK_RELATIONS</code></li>
+          <li><code>evs_track_relations_bits</code> vs <code>IsCatalogRelationOid()</code></li>
+          <li>If <code>track_relations_from_list</code>: <code>hash_search(evs_track_relations_hash, HASH_FIND)</code></li>
+          <li>If <code>track_databases_from_list</code>: <code>hash_search(evs_track_databases_hash, HASH_FIND)</code></li>
+        </ul>
+      </div>
+      <div class="dia-box d-filter" style="flex:1; max-width:420px;">
+        <h4 style="color:var(--cyan);">evs_should_track_database_statistics(dboid)</h4>
+        <ul>
+          <li><code>evs_track_bits & EVS_TRACK_DATABASES</code></li>
+          <li>If <code>track_databases_from_list</code>: <code>hash_search(evs_track_databases_hash, HASH_FIND)</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:540px;">
+        <h4 style="color:var(--green);">extvac_store(dboid, relid, type, params, store_rel, store_db)</h4>
+        <p>Acquires pgstat entry refs with locking, accumulates counters, unlocks</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: GUC Bitmask Internals
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: GUC Bitmask Internals</h2>
+
+  <div class="grid2">
+    <div class="card card-accent" style="border-left-color: var(--orange);">
+      <h3 style="color:var(--orange); font-size:14px;">evs_track_bits</h3>
+      <div class="file-ref">Derived from vacuum_statistics.object_types</div>
+      <div class="mem-block" style="margin-top:8px;">
+        <div class="field" style="background:rgba(74,222,128,.15); flex:1;">
+          <span class="field-name">bit 0: EVS_TRACK_RELATIONS</span>
+        </div>
+        <div class="field" style="background:rgba(59,130,246,.15); flex:1;">
+          <span class="field-name">bit 1: EVS_TRACK_DATABASES</span>
+        </div>
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        "all" = both bits set | "relations" = bit 0 only | "databases" = bit 1 only
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--orange);">
+      <h3 style="color:var(--orange); font-size:14px;">evs_collect_mask</h3>
+      <div class="file-ref">Derived from vacuum_statistics.collect</div>
+      <div class="mem-block" style="margin-top:8px;">
+        <div class="field" style="background:rgba(59,130,246,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x1<br>BUFFERS</span>
+        </div>
+        <div class="field" style="background:rgba(74,222,128,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x2<br>WAL</span>
+        </div>
+        <div class="field" style="background:rgba(245,158,11,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x4<br>GENERAL</span>
+        </div>
+        <div class="field" style="background:rgba(168,85,247,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x8<br>TIMING</span>
+        </div>
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        "all" = 0xF | "buffers,timing" = 0x9 | etc.
+      </p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Shared Memory Layout
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Shared Memory Layout</h2>
+
+  <div class="card">
+    <h3 style="color:var(--green); font-size:14px;">PgStatShared_ExtVacEntry (~232 bytes on x86_64)</h3>
+    <div class="file-ref">vacuum_statistics.c : lines 131-135</div>
+
+    <div class="mem-block" style="margin-top:16px; border: 2px solid var(--green); border-radius:8px;">
+      <div class="field" style="background:rgba(100,116,139,.15); flex: 0 0 160px;">
+        <span class="field-name">PgStatShared_Common</span>
+        <span class="field-size">pgstat header</span>
+      </div>
+      <div class="field" style="background:rgba(74,222,128,.1); flex: 1; padding:0;">
+        <div style="padding:6px 10px;">
+          <span class="field-name">PgStat_VacuumRelationCounts stats</span>
+        </div>
+        <div style="display:flex; border-top:1px solid rgba(255,255,255,.1);">
+          <div class="field" style="background:rgba(59,130,246,.1); flex:1;">
+            <span class="field-name" style="font-size:10px;">common</span>
+            <span class="field-size">
+              blks_read, blks_hit,<br>blks_dirtied, blks_written,<br>
+              blks_fetched, blks_hit,<br>
+              wal_records, wal_fpi, wal_bytes,<br>
+              blk_read_time, blk_write_time,<br>
+              delay_time, total_time,<br>
+              wraparound_failsafe_count,<br>
+              interrupts_count,<br>
+              tuples_deleted
+            </span>
+          </div>
+          <div class="field" style="background:rgba(245,158,11,.1); flex:1;">
+            <span class="field-name" style="font-size:10px;">union { table | index }</span>
+            <span class="field-size">
+              <strong style="color:var(--green);">TABLE:</strong><br>
+              pages_scanned, pages_removed,<br>
+              vm_new_frozen_pages,<br>
+              vm_new_visible_pages,<br>
+              vm_new_visible_frozen_pages,<br>
+              tuples_frozen,<br>
+              recently_dead_tuples,<br>
+              index_vacuum_count,<br>
+              missed_dead_pages,<br>
+              missed_dead_tuples
+              <br><br>
+              <strong style="color:var(--amber);">INDEX:</strong><br>
+              pages_deleted
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Key Encoding -->
+  <div class="card card-accent" style="border-left-color: var(--teal);">
+    <h3 style="color:var(--teal); font-size:14px;">Key Encoding: EXTVAC_OBJID</h3>
+    <div class="file-ref">vacuum_statistics.c : line 119</div>
+    <p style="margin-top:8px;">
+      Each pgstat entry is addressed by <code>(kind, dboid, objid)</code>.
+      For relations, <code>objid</code> packs both the relation OID and type into a single <code>uint64</code>:
+    </p>
+    <div class="mem-block" style="margin-top:12px; border:2px solid var(--teal); border-radius:8px;">
+      <div class="field" style="background:rgba(45,212,191,.1); flex:3;">
+        <span class="field-name">relid (bits 63..2)</span>
+        <span class="field-size">Relation OID, shifted left by 2</span>
+      </div>
+      <div class="field" style="background:rgba(245,158,11,.15); flex:1;">
+        <span class="field-name">type (bits 1..0)</span>
+        <span class="field-size">0 = PGSTAT_EXTVAC_TABLE<br>1 = PGSTAT_EXTVAC_INDEX</span>
+      </div>
+    </div>
+    <div class="code-block">
+      <span style="color:var(--purple);">#define</span> <span style="color:var(--amber);">EXTVAC_OBJID</span>(relid, type) \<br>
+      &nbsp;&nbsp;(((uint64)(relid)) &lt;&lt; 2 | ((type) &amp; 3))
+    </div>
+  </div>
+
+  <!-- pgstat kinds -->
+  <div class="card card-accent" style="border-left-color: var(--green);">
+    <h3 style="color:var(--green); font-size:14px;">Registered pgstat Kinds</h3>
+    <div class="grid2" style="margin-top:12px;">
+      <div>
+        <p><strong>Kind 24: PGSTAT_KIND_EXTVAC_RELATION</strong></p>
+        <ul style="font-size:12px;">
+          <li>Key: <code>(dboid, EXTVAC_OBJID(relid, type))</code></li>
+          <li>One entry per table or index</li>
+          <li>Full <code>PgStat_VacuumRelationCounts</code></li>
+          <li>Created on first vacuum of that relation</li>
+        </ul>
+      </div>
+      <div>
+        <p><strong>Kind 25: PGSTAT_KIND_EXTVAC_DB</strong></p>
+        <ul style="font-size:12px;">
+          <li>Key: <code>(dboid, InvalidOid)</code></li>
+          <li>One entry per database</li>
+          <li>Only common counters (buffers, WAL, timing)</li>
+          <li>Aggregated across all relations in that DB</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Backend-Local Hash Tables
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Backend-Local Hash Tables (Track Lists)</h2>
+  <div class="file-ref">vacuum_statistics.c : lines 97-98, 124-128</div>
+
+  <p>Track lists are stored as <strong>backend-local</strong> HTAB hash tables, loaded from
+  a shared file on demand (first access per backend). They are <em>not</em> in shared memory &mdash;
+  each backend has its own copy, synchronized through the file.</p>
+
+  <div class="dia">
+    <div class="dia-row" style="gap: 20px;">
+      <div class="dia-box d-hash" style="flex:1; max-width:440px; text-align:left; padding:20px;">
+        <h4 style="color:var(--teal); text-align:center; margin-bottom:12px;">evs_track_databases_hash</h4>
+        <p style="font-size:12px; text-align:center; margin-bottom:12px;">
+          <code>HTAB*</code> &mdash; key: <code>Oid</code> (single database OID)
+        </p>
+        <div style="border:1px solid var(--teal); border-radius:8px; overflow:hidden;">
+          <div style="display:flex; background:rgba(45,212,191,.15); padding:8px 12px; font-size:11px; font-weight:600; border-bottom:1px solid var(--teal);">
+            <span style="flex:1;">Bucket</span>
+            <span style="flex:2;">Key: Oid (dboid)</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[0]</span>
+            <span style="flex:2;"><code>16384</code> <span style="color:var(--dim);">(mydb)</span></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[1]</span>
+            <span style="flex:2;"><code>16385</code> <span style="color:var(--dim);">(testdb)</span></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; color:var(--dim);">
+            <span style="flex:1;">[...]</span>
+            <span style="flex:2;">...</span>
+          </div>
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px; text-align:center;">
+          Lookup: <code>hash_search(hash, &amp;dboid, HASH_FIND, NULL)</code>
+        </p>
+      </div>
+
+      <div class="dia-box d-hash" style="flex:1; max-width:440px; text-align:left; padding:20px;">
+        <h4 style="color:var(--teal); text-align:center; margin-bottom:12px;">evs_track_relations_hash</h4>
+        <p style="font-size:12px; text-align:center; margin-bottom:12px;">
+          <code>HTAB*</code> &mdash; key: <code>EvsTrackRelKey {dboid, reloid}</code>
+        </p>
+        <div style="border:1px solid var(--teal); border-radius:8px; overflow:hidden;">
+          <div style="display:flex; background:rgba(45,212,191,.15); padding:8px 12px; font-size:11px; font-weight:600; border-bottom:1px solid var(--teal);">
+            <span style="flex:1;">Bucket</span>
+            <span style="flex:1;">dboid</span>
+            <span style="flex:1;">reloid</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[0]</span>
+            <span style="flex:1;"><code>16384</code></span>
+            <span style="flex:1;"><code>24601</code></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[1]</span>
+            <span style="flex:1;"><code>0</code> <span style="color:var(--dim);">(cluster)</span></span>
+            <span style="flex:1;"><code>1259</code> <span style="color:var(--dim);">(pg_class)</span></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; color:var(--dim);">
+            <span style="flex:1;">[...]</span>
+            <span style="flex:1;">...</span>
+            <span style="flex:1;">...</span>
+          </div>
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px; text-align:center;">
+          Composite key &mdash; <code>dboid=0</code> means cluster-wide (shared catalogs)
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Synchronization flow:</strong> Backend modifies hash &rarr; acquires LWLock &rarr;
+    writes full hash to file &rarr; releases lock. Other backends detect stale copy on next
+    access &rarr; acquire LWLock &rarr; reload from file.
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Track List Persistence & Locking
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Track List Persistence &amp; Locking</h2>
+
+  <div class="dia">
+    <div class="dia-row" style="gap: 24px; align-items: flex-start;">
+      <div class="dia-box d-lock" style="flex:0 0 220px;">
+        <h4 style="color:var(--red);">LWLock Tranche</h4>
+        <p style="font-size:12px; color:var(--muted);">"ext_vacuum_statistics_track"</p>
+        <p style="margin-top:8px;">Protects concurrent<br>file reads &amp; writes<br>across all backends</p>
+        <p style="margin-top:8px; font-size:10px; color:var(--dim);">
+          Requested in shmem_request_hook.<br>
+          Acquired via evs_get_track_lock().
+        </p>
+      </div>
+
+      <div style="display:flex; flex-direction:column; align-items:center; flex:1; max-width:540px;">
+        <div class="dia-box d-file" style="width:100%;">
+          <h4 style="color:var(--dim);">pg_stat/ext_vacuum_statistics_track.oid</h4>
+          <div style="text-align:left; margin-top:10px; font-family:'JetBrains Mono',monospace; font-size:12px; background:rgba(0,0,0,.3); padding:14px; border-radius:6px; color:var(--muted); line-height:1.6;">
+            <div style="color:var(--dim);"># One entry per line</div>
+            <div style="color:var(--dim);"># Single OID = database</div>
+            <div style="color:var(--cyan);">16384</div>
+            <div style="color:var(--dim);"># Two OIDs = dboid reloid (relation)</div>
+            <div style="color:var(--teal);">16384 24601</div>
+            <div style="color:var(--dim);"># dboid=0 means cluster-wide (shared catalog)</div>
+            <div style="color:var(--teal);">0 1259</div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px; font-size:13px; color:var(--text); text-align:left; width:100%;">
+          <div style="margin-bottom:8px;">
+            <strong style="color:var(--green);">Load:</strong>
+            <code>evs_track_load_file()</code> &mdash; on demand, first access per backend.
+            Reads file under LWLock shared, builds HTAB.
+          </div>
+          <div style="margin-bottom:8px;">
+            <strong style="color:var(--amber);">Save:</strong>
+            <code>evs_track_save_file()</code> &mdash; on every <code>add_track_*</code> / <code>remove_track_*</code>.
+            Acquires LWLock exclusive, writes full file.
+          </div>
+          <div>
+            <strong style="color:var(--red);">Cleanup:</strong>
+            <code>evs_drop_access_hook()</code> &mdash; fires on <code>OAT_DROP</code>.
+            Removes OID from hash + saves file. pgstat entry cleaned by framework.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Accumulation Functions
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Accumulation Functions</h2>
+
+  <div class="card">
+    <h3 style="color:var(--green); font-size:14px;">extvac_store() &mdash; Core Storage Logic</h3>
+    <div class="file-ref">vacuum_statistics.c : line 863</div>
+    <div class="code-block">
+      <span style="color:var(--dim);">// Per-relation storage</span><br>
+      <span style="color:var(--cyan);">if</span> (store_relation) {<br>
+      &nbsp;&nbsp;objid = <span style="color:var(--teal);">EXTVAC_OBJID</span>(relid, type);<br>
+      &nbsp;&nbsp;entry_ref = <span style="color:var(--amber);">pgstat_get_entry_ref_locked</span>(<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green);">PGSTAT_KIND_EXTVAC_RELATION</span>, dboid, objid, <span style="color:var(--pink);">false</span>);<br>
+      &nbsp;&nbsp;shared = (PgStatShared_ExtVacEntry *) entry_ref-&gt;shared_stats;<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_accumulate_extvac_stats</span>(&amp;shared-&gt;stats, params);<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_unlock_entry</span>(entry_ref);<br>
+      }<br><br>
+      <span style="color:var(--dim);">// Per-database aggregation</span><br>
+      <span style="color:var(--cyan);">if</span> (store_db) {<br>
+      &nbsp;&nbsp;entry_ref = <span style="color:var(--amber);">pgstat_get_entry_ref_locked</span>(<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green);">PGSTAT_KIND_EXTVAC_DB</span>, dboid, <span style="color:var(--pink);">InvalidOid</span>, <span style="color:var(--pink);">false</span>);<br>
+      &nbsp;&nbsp;shared = (PgStatShared_ExtVacEntry *) entry_ref-&gt;shared_stats;<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_accumulate_common_for_db</span>(&amp;shared-&gt;stats.common, &amp;params-&gt;common);<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_unlock_entry</span>(entry_ref);<br>
+      }
+    </div>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--orange);">
+    <h3 style="color:var(--orange); font-size:14px;">ACCUM_IF Macro &mdash; Category-Selective Accumulation</h3>
+    <div class="file-ref">vacuum_statistics.c : lines 170-174</div>
+    <div class="code-block">
+      <span style="color:var(--purple);">#define</span> <span style="color:var(--amber);">ACCUM_IF</span>(dst, src, field, cat) \<br>
+      &nbsp;&nbsp;<span style="color:var(--cyan);">do</span> { \<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--cyan);">if</span> (evs_collect_mask &amp; (cat)) \<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(dst)-&gt;field += (src)-&gt;field; \<br>
+      &nbsp;&nbsp;} <span style="color:var(--cyan);">while</span>(0)
+    </div>
+    <p style="margin-top:8px; font-size:13px; color:var(--muted);">
+      Every counter field is guarded by its category bit. If <code>collect = 'buffers,timing'</code>,
+      then <code>evs_collect_mask = 0x9</code> and WAL/general fields are never incremented &mdash;
+      they remain zero in the shared memory entry.
+    </p>
+    <p style="margin-top:8px; font-size:13px; color:var(--muted);">
+      Used in <code>pgstat_accumulate_common()</code> (line 176) and
+      <code>pgstat_accumulate_extvac_stats()</code> (line 197) which adds table/index-specific fields.
+    </p>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Output Pipeline
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Output Pipeline</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-out" style="min-width:340px;">
+        <h4 style="color:var(--amber);">SQL View: pg_stats_vacuum_tables</h4>
+        <p>JOINs <code>pg_class</code> + <code>pg_database</code> + <code>pg_namespace</code><br>
+        Calls C function for each matching (db, rel) pair</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:440px;">
+        <h4 style="color:var(--purple);">pg_stats_get_vacuum_tables(dboid, reloid)</h4>
+        <p>Thin wrapper &rarr; <code>pg_stats_vacuum(fcinfo, PGSTAT_EXTVAC_TABLE)</code></p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:540px; text-align:left; padding:18px 24px;">
+        <h4 style="color:var(--green); text-align:center; margin-bottom:8px;">pg_stats_vacuum(fcinfo, type)</h4>
+        <div class="file-ref" style="text-align:center;">vacuum_statistics.c : line 1285</div>
+        <ul style="font-size:12px;">
+          <li>Computes <code>objid = EXTVAC_OBJID(relid, type)</code></li>
+          <li>Calls <code>pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, dbid, objid)</code></li>
+          <li>Falls back to cluster entry (<code>dboid=InvalidOid</code>) for shared catalogs</li>
+          <li>Builds tuplestore row via <code>tuplestore_put_for_relation()</code></li>
+          <li>&mdash; which calls <code>tuplestore_put_common()</code> for shared fields</li>
+          <li>For DB view: fetches kind 25, outputs common + <code>interrupts_count</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:300px;">
+        <div class="person-wrap">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA</span>
+          <p style="font-size:11px; color:var(--muted);">Receives tuplestore as SQL result set</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module: Cleanup on DROP
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>Module: Cleanup on DROP</h2>
+  <div class="card card-accent" style="border-left-color: var(--red);">
+    <h3 style="color:var(--red); font-size:14px;">evs_drop_access_hook() &mdash; object_access_hook</h3>
+    <div class="file-ref">vacuum_statistics.c : line 455</div>
+    <p style="margin-top:8px;">
+      When a table or database is dropped, PostgreSQL fires the <code>object_access_hook</code>
+      with <code>OAT_DROP</code>. The extension:
+    </p>
+    <ul>
+      <li>Checks if the dropped OID is in <code>evs_track_relations_hash</code> or <code>evs_track_databases_hash</code></li>
+      <li>If found: removes from hash, acquires LWLock, saves updated file</li>
+      <li>The pgstat entry for the dropped object is cleaned up by the pgstat framework automatically
+        (pgstat handles orphaned entries on its own)</li>
+      <li>Chains to <code>prev_object_access_hook</code> if set</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

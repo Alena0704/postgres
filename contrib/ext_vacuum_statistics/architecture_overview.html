@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — Overview</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --blue: #3b82f6; --purple: #a855f7; --cyan: #22d3ee;
+    --green: #4ade80; --amber: #f59e0b; --pink: #f472b6;
+    --orange: #fb923c; --red: #ef4444; --teal: #2dd4bf;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+  /* ── nav ── */
+  .nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: center; align-items: center; gap: 0;
+    background: #020617; border-bottom: 1px solid var(--bg3);
+  }
+  .nav a {
+    padding: 16px 28px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-decoration: none; border-bottom: 3px solid transparent;
+    transition: all .2s; text-align: center; line-height: 1.3;
+  }
+  .nav a:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .nav a.active { color: #fff; border-bottom-color: var(--blue); }
+  .nav a small { display: block; font-weight: 400; font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+  /* ── content ── */
+  .content { padding: 40px 32px 80px; max-width: 1200px; margin: 0 auto; }
+
+  h1 { font-size: 32px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; color: #fff; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 16px; margin-bottom: 8px; }
+  p, li { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .lead { font-size: 16px; color: var(--muted); margin-bottom: 32px; line-height: 1.6; }
+
+  .card {
+    background: var(--bg2); border: 1px solid var(--bg3); border-radius: 16px;
+    padding: 28px; margin-bottom: 20px;
+  }
+  .card-accent { border-left: 4px solid; }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card ul { padding-left: 20px; margin-top: 8px; }
+  .card li { margin-bottom: 4px; }
+  code {
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 2px 7px;
+    border-radius: 4px; color: #7dd3fc; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 2px 10px;
+    border-radius: 20px; font-weight: 600; margin-right: 6px;
+  }
+  .tag-blue   { background: rgba(59,130,246,.2); color: var(--blue); }
+  .tag-green  { background: rgba(74,222,128,.2); color: var(--green); }
+  .tag-amber  { background: rgba(245,158,11,.2); color: var(--amber); }
+  .tag-purple { background: rgba(168,85,247,.2); color: var(--purple); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .callout {
+    background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout strong { color: var(--cyan); }
+  .sep { border: none; border-top: 1px solid var(--bg3); margin: 40px 0; }
+
+  /* ── diagram ── */
+  .dia { text-align: center; margin: 32px auto; max-width: 1000px; }
+  .dia-row { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  .dia-box {
+    border-radius: 12px; padding: 14px 18px; text-align: center;
+    min-width: 160px; font-size: 13px; line-height: 1.5;
+  }
+  .dia-box h4 { font-size: 13px; margin-bottom: 4px; }
+  .dia-box p  { font-size: 11px; color: var(--muted); }
+
+  .d-pg   { background: #1e3a5f; border: 2px solid var(--blue); }
+  .d-hook { background: #3b1f5e; border: 2px solid var(--purple); }
+  .d-store{ background: #1c3322; border: 2px solid var(--green); }
+  .d-out  { background: #3a2710; border: 2px solid var(--amber); }
+  .d-user { background: #3b1530; border: 2px solid var(--pink); }
+
+  .arrow {
+    display: flex; justify-content: center; align-items: center;
+    height: 40px; position: relative;
+  }
+  .arrow::before { content: ''; width: 2px; height: 20px; background: var(--dim); }
+  .arrow::after {
+    content: ''; position: absolute; bottom: 4px;
+    border-left: 7px solid transparent; border-right: 7px solid transparent;
+    border-top: 9px solid var(--dim);
+  }
+  .arrow-label {
+    position: absolute; font-size: 11px; color: var(--muted);
+    right: calc(50% - 180px); white-space: nowrap;
+  }
+
+  .person-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .person-label { font-size: 13px; font-weight: 600; }
+  .flow-wide .dia-box { flex: 1; min-width: 200px; max-width: 320px; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a class="active" href="architecture_overview.html">
+    Overview
+    <small>for everyone</small>
+  </a>
+  <a href="architecture_dba.html">
+    DBA Guide
+    <small>configuration &amp; usage</small>
+  </a>
+  <a href="architecture_internals.html">
+    Internals
+    <small>for developers</small>
+  </a>
+  <a href="architecture_vacuum_core.html">
+    VACUUM Core
+    <small>how vacuum &amp; stats work</small>
+  </a>
+</div>
+
+<div class="content">
+
+  <h1>How ext_vacuum_statistics Works</h1>
+  <p class="lead">
+    This extension gives you detailed metrics about what PostgreSQL's VACUUM process actually does:
+    how much I/O it generates, how many pages it scans, how many tuples it freezes,
+    and how long it takes. All of this happens transparently &mdash;
+    VACUUM works exactly as before, but now you can see inside it.
+  </p>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module 1: What PostgreSQL Core collects
+       ══════════════════════════════════════════════════════ -->
+  <h2>What PostgreSQL Already Collects Inside VACUUM</h2>
+  <div class="card card-accent" style="border-left-color: var(--blue);">
+    <h3><span class="tag tag-blue">PostgreSQL Core</span> Vacuum Counters</h3>
+    <p style="margin-top:8px;">
+      Every time PostgreSQL runs VACUUM (manually or via autovacuum), the core engine
+      already computes a rich set of internal counters. Think of it like an odometer
+      in a car &mdash; the engine tracks everything, but normally these numbers
+      are not shown to you.
+    </p>
+    <div class="grid2" style="margin-top:16px;">
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Buffer I/O</h3>
+        <p>How intensely VACUUM uses the disk and memory cache.</p>
+        <ul>
+          <li><strong>Pages read from disk</strong> &mdash; each page is 8 KB of table data</li>
+          <li><strong>Pages found in cache</strong> (shared buffers hits) &mdash; no disk needed</li>
+          <li><strong>Pages dirtied &amp; written back</strong> &mdash; changes that VACUUM made</li>
+          <li><strong>Time spent on reads &amp; writes</strong> &mdash; actual I/O wait time</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">WAL (Write-Ahead Log)</h3>
+        <p>How much write-ahead log VACUUM generates. This directly affects replication lag and disk usage.</p>
+        <ul>
+          <li><strong>WAL records</strong> &mdash; number of log entries</li>
+          <li><strong>Full-page images (FPI)</strong> &mdash; full page snapshots written to WAL</li>
+          <li><strong>Total WAL bytes</strong> &mdash; overall WAL volume produced</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Heap Work (tables)</h3>
+        <p>The actual cleanup work VACUUM does on table data.</p>
+        <ul>
+          <li><strong>Pages scanned &amp; removed</strong> &mdash; how much of the table was processed</li>
+          <li><strong>Dead tuples deleted</strong> &mdash; old row versions cleaned up</li>
+          <li><strong>Tuples frozen</strong> &mdash; rows protected from transaction ID wraparound</li>
+          <li><strong>Visibility map updates</strong> &mdash; pages marked as all-visible or all-frozen</li>
+          <li><strong>Index vacuum passes</strong> &mdash; how many times indexes were cleaned</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Timing &amp; Safety</h3>
+        <p>Operational metrics: how long things take and whether safety mechanisms triggered.</p>
+        <ul>
+          <li><strong>Total vacuum time</strong> &mdash; wall-clock duration</li>
+          <li><strong>Cost-based delay time</strong> &mdash; intentional pauses to limit I/O impact</li>
+          <li><strong>Wraparound failsafe triggers</strong> &mdash; emergency anti-wraparound activations</li>
+          <li><strong>Interrupt events</strong> &mdash; times VACUUM was interrupted (e.g., by conflicting locks)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:16px;">
+      <strong>The problem:</strong> PostgreSQL computes all these numbers internally during every vacuum,
+      but there was no way for DBAs to access them programmatically after the vacuum finishes.
+      The numbers were computed and then discarded, or only partially logged to the server log
+      in text format that's hard to query or aggregate.
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Module 2: What the extension adds
+       ══════════════════════════════════════════════════════ -->
+  <h2>What ext_vacuum_statistics Adds</h2>
+
+  <div class="card card-accent" style="border-left-color: var(--purple);">
+    <h3><span class="tag tag-purple">Extension</span> The Hook Mechanism</h3>
+    <p style="margin-top:8px;">
+      PostgreSQL has a system of <strong>hooks</strong> &mdash; special "connectors" where
+      extensions can plug in their own code. Think of it like a tee-junction in a pipe:
+      the water (data) flows normally, but you install a side-branch to capture a sample.
+    </p>
+    <p style="margin-top:8px;">
+      Our extension uses the <code>set_report_vacuum_hook</code>. At the exact moment
+      when VACUUM finishes processing a table or index, PostgreSQL calls our function
+      and hands over all the counters described above. We don't change VACUUM's behavior
+      at all &mdash; we just intercept the report. Zero performance overhead on the vacuum itself.
+    </p>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--green);">
+    <h3><span class="tag tag-green">Extension</span> Statistics Accumulation</h3>
+    <p style="margin-top:8px;">
+      Once the extension receives the counters from VACUUM, it stores them in
+      <strong>shared memory</strong> &mdash; a region of RAM that all PostgreSQL
+      backend processes can access simultaneously. The statistics are <strong>cumulative</strong>:
+      each time VACUUM runs on the same table, the new numbers are <em>added</em>
+      to the existing totals. This way you see the full picture over time,
+      not just the last run.
+    </p>
+    <p style="margin-top:12px;">
+      Statistics are saved at three levels of granularity:
+    </p>
+    <ul style="margin-top:4px;">
+      <li><strong>Per table</strong> &mdash; the most detailed: every counter for each individual table</li>
+      <li><strong>Per index</strong> &mdash; separate counters for each index that was vacuumed</li>
+      <li><strong>Per database</strong> &mdash; aggregated totals across all objects in a database</li>
+    </ul>
+    <p style="margin-top:12px;">
+      The extension also saves these statistics to disk automatically, so they survive
+      normal PostgreSQL restarts. You don't lose your history when you restart the server.
+    </p>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--amber);">
+    <h3><span class="tag tag-amber">Extension</span> Querying the Statistics</h3>
+    <p style="margin-top:8px;">
+      The extension provides three SQL <strong>views</strong> &mdash; just like the built-in
+      PostgreSQL system views (e.g. <code>pg_stat_user_tables</code>). You query them with
+      regular <code>SELECT</code>, join them with other tables, filter, sort &mdash;
+      nothing special needed:
+    </p>
+    <ul style="margin-top:8px;">
+      <li><code>pg_stats_vacuum_tables</code> &mdash; one row per table, all vacuum metrics</li>
+      <li><code>pg_stats_vacuum_indexes</code> &mdash; one row per index, index-specific metrics</li>
+      <li><code>pg_stats_vacuum_database</code> &mdash; one row per database, aggregated totals</li>
+    </ul>
+    <p style="margin-top:12px;">
+      You can also <strong>configure</strong> which objects to track, which categories of counters to collect,
+      and <strong>reset</strong> statistics when needed. All through simple SQL commands and
+      <code>postgresql.conf</code> settings.
+    </p>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       Diagram: How It All Fits Together
+       ══════════════════════════════════════════════════════ -->
+  <hr class="sep">
+  <h2>How It All Fits Together</h2>
+
+  <div class="dia">
+
+    <!-- PostgreSQL Core -->
+    <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin-bottom:6px;">PostgreSQL Core</div>
+    <div class="dia-row">
+      <div class="dia-box d-pg" style="min-width:460px;">
+        <h4 style="color:var(--blue);">VACUUM / AUTOVACUUM</h4>
+        <p>Runs on each table &amp; index. Computes all internal counters:<br>
+        buffers, WAL, pages, tuples, timing, safety triggers...</p>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label">Hook intercepts the report</span>
+    </div>
+
+    <!-- Extension -->
+    <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin-bottom:6px;">ext_vacuum_statistics Extension</div>
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:460px;">
+        <h4 style="color:var(--purple);">Receive &amp; Filter</h4>
+        <p>Gets all counters from VACUUM. Checks settings to decide<br>
+        which objects to track and which counter categories to save.</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:460px;">
+        <h4 style="color:var(--green);">Store &amp; Accumulate</h4>
+        <p>Adds new counters to cumulative totals in shared memory.<br>
+        Per table, per index, and per database. Auto-saved to disk.</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <!-- Views -->
+    <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin-bottom:6px;">SQL Views</div>
+    <div class="dia-row flow-wide">
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Tables</h4>
+        <p>pg_stats_vacuum_tables<br>Full per-table breakdown</p>
+      </div>
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Indexes</h4>
+        <p>pg_stats_vacuum_indexes<br>Per-index metrics</p>
+      </div>
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Databases</h4>
+        <p>pg_stats_vacuum_database<br>Aggregated totals</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <!-- User -->
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:340px;">
+        <div class="person-wrap">
+          <svg width="56" height="56" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA / User</span>
+          <p style="font-size:12px;color:var(--muted);">
+            SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;<br>
+            &mdash; regular SQL, nothing special needed
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

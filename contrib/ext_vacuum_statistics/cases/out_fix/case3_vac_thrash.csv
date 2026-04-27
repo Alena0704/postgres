@@ -1,0 +1,1 @@
+t_from,t_to,schemaname,relname,d_pages_scanned,d_tuples_deleted,d_pages_removed,d_blks_read,d_blks_dirty,d_wal_bytes,pages_per_dead_tuple,blks_read_per_dead_tuple,d_failsafe

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — Extra Slides</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 48px;
+  }
+  h1 { font-size: 28px; text-align: center; margin-bottom: 6px; }
+  .subtitle { font-size: 16px; color: #94a3b8; text-align: center; margin-bottom: 48px; }
+  .slide { margin-bottom: 80px; width: 100%; max-width: 1200px; }
+  .stitle {
+    font-size: 16px; font-weight: 700; color: #94a3b8;
+    text-transform: uppercase; letter-spacing: 2px; margin-bottom: 16px;
+  }
+
+  .flow { display: flex; align-items: stretch; gap: 0; }
+  .box {
+    flex: 1; border-radius: 18px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .box-head {
+    padding: 14px 20px; font-size: 16px; font-weight: 700;
+  }
+  .box-body {
+    padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 0; flex: 1;
+  }
+  .step {
+    padding: 10px 14px; font-size: 16px; line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-icon { font-size: 16px; flex-shrink: 0; width: 22px; text-align: center; margin-top: 1px; }
+  .step-text { flex: 1; }
+  .step-text strong { font-weight: 700; }
+  .step-sub { font-size: 14px; color: #94a3b8; margin-top: 2px; }
+  code {
+    font-size: 14px; background: rgba(0,0,0,.3); padding: 1px 5px;
+    border-radius: 3px; color: #7dd3fc; font-family: 'JetBrains Mono', monospace;
+  }
+
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 48px; flex-shrink: 0;
+  }
+  .arrow svg { display: block; }
+
+  /* colors */
+  .c-green  { background: rgba(74,222,128,.06); border: 2px solid #4ade80; }
+  .c-green .box-head { background: rgba(74,222,128,.12); color: #4ade80; }
+  .c-red    { background: rgba(251,113,133,.06); border: 2px solid #fb7185; }
+  .c-red .box-head { background: rgba(251,113,133,.12); color: #fb7185; }
+  .c-blue   { background: rgba(56,189,248,.06); border: 2px solid #38bdf8; }
+  .c-blue .box-head { background: rgba(56,189,248,.12); color: #38bdf8; }
+  .c-purple { background: rgba(168,85,247,.06); border: 2px solid #a855f7; }
+  .c-purple .box-head { background: rgba(168,85,247,.12); color: #a855f7; }
+  .c-amber  { background: rgba(245,158,11,.06); border: 2px solid #f59e0b; }
+  .c-amber .box-head { background: rgba(245,158,11,.12); color: #f59e0b; }
+  .c-teal   { background: rgba(45,212,191,.06); border: 2px solid #2dd4bf; }
+  .c-teal .box-head { background: rgba(45,212,191,.12); color: #2dd4bf; }
+  .c-cyan   { background: rgba(34,211,238,.06); border: 2px solid #22d3ee; }
+  .c-cyan .box-head { background: rgba(34,211,238,.12); color: #22d3ee; }
+
+  .report {
+    margin: 8px 14px 14px; padding: 12px 16px;
+    border-radius: 12px; font-size: 16px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+    border: 2px solid;
+  }
+  .r-green { background: rgba(74,222,128,.08); border-color: #4ade80; color: #4ade80; }
+  .r-amber { background: rgba(245,158,11,.08); border-color: #f59e0b; color: #f59e0b; }
+
+  .footnote {
+    margin-top: 20px; font-size: 16px; color: #94a3b8; text-align: center;
+    padding: 10px 24px; background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.08); border-radius: 10px;
+  }
+
+  /* ── interaction diagram ── */
+  .interact {
+    display: flex; align-items: center; justify-content: center; gap: 0;
+    margin: 24px 0;
+  }
+  .actor {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    flex: 0 0 140px;
+  }
+  .actor-label { font-size: 16px; font-weight: 700; }
+
+  .msg-col {
+    flex: 1; display: flex; flex-direction: column; gap: 12px;
+    max-width: 500px;
+  }
+  .msg {
+    display: flex; align-items: center; gap: 8px; font-size: 14px;
+  }
+  .msg-line {
+    flex: 1; height: 2px; position: relative;
+  }
+  .msg-line::after {
+    content: ''; position: absolute; right: -1px; top: -5px;
+    border-top: 6px solid transparent; border-bottom: 6px solid transparent;
+  }
+  .msg-right .msg-line { background: #4ade80; }
+  .msg-right .msg-line::after { border-left: 8px solid #4ade80; }
+  .msg-left .msg-line { background: #38bdf8; }
+  .msg-left .msg-line::after { border-right: 8px solid #38bdf8; right: auto; left: -1px; }
+  .msg-label {
+    font-size: 14px; white-space: nowrap;
+  }
+
+  /* ── pros/cons grid ── */
+  .pc-grid {
+    display: flex; gap: 20px; margin-top: 16px;
+  }
+  .pc-col { flex: 1; }
+  .pc-item {
+    display: flex; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    font-size: 16px; line-height: 1.5;
+  }
+  .pc-item:last-child { border-bottom: none; }
+  .pc-icon { font-size: 16px; flex-shrink: 0; }
+  .pc-text { flex: 1; }
+  .pc-text strong { font-weight: 700; }
+  .pc-text .sub { font-size: 14px; color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 1: DBA ↔ Extension interaction
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>DBA ↔ ext_vacuum_statistics Interaction</h1>
+  <p class="subtitle">What the DBA does and what the extension does in response</p>
+
+  <div class="flow">
+
+    <!-- DBA side -->
+    <div style="flex:0 0 160px; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding-top:20px; gap:12px;">
+      <svg width="72" height="72" viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="14" r="10" fill="#fb7185" opacity=".7"/>
+        <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="#fb7185" opacity=".5"/>
+      </svg>
+      <span style="font-size:16px; font-weight:700; color:#fb7185;">DBA</span>
+    </div>
+
+    <!-- Messages -->
+    <div style="flex:1; display:flex; flex-direction:column; gap:16px; padding:16px 0;">
+
+      <!-- 1. Install -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="flex:1; height:2px; background:#4ade80; position:relative;">
+          <div style="position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:8px solid #4ade80;"></div>
+        </div>
+        <span style="font-size:14px; color:#4ade80; white-space:nowrap;">shared_preload_libraries + CREATE EXTENSION</span>
+      </div>
+
+      <!-- 2. Configure -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="flex:1; height:2px; background:#22d3ee; position:relative;">
+          <div style="position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:8px solid #22d3ee;"></div>
+        </div>
+        <span style="font-size:14px; color:#22d3ee; white-space:nowrap;">SET vacuum_statistics.collect = 'buffers,timing'</span>
+      </div>
+
+      <!-- 3. Vacuum runs automatically -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; color:#94a3b8; white-space:nowrap;">autovacuum runs → hook fires → stats accumulate</span>
+        <div style="flex:1; height:2px; background:#94a3b8; border-style:dashed; position:relative;">
+        </div>
+      </div>
+
+      <!-- 4. Query -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="flex:1; height:2px; background:#4ade80; position:relative;">
+          <div style="position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:8px solid #4ade80;"></div>
+        </div>
+        <span style="font-size:14px; color:#4ade80; white-space:nowrap;">SELECT * FROM pg_stats_vacuum_tables</span>
+      </div>
+
+      <!-- 5. Response -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-size:14px; color:#38bdf8; white-space:nowrap;">blks_read: 340, pages_scanned: 128, total_time: 1.2s</span>
+        <div style="flex:1; height:2px; background:#38bdf8; position:relative;">
+          <div style="position:absolute; left:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-right:8px solid #38bdf8;"></div>
+        </div>
+      </div>
+
+      <!-- 6. pg_profile takes sample -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="flex:1; height:2px; background:#a855f7; position:relative;">
+          <div style="position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:8px solid #a855f7;"></div>
+        </div>
+        <span style="font-size:14px; color:#a855f7; white-space:nowrap;">pg_profile take_sample() → snapshot vacuum stats</span>
+      </div>
+
+      <!-- 7. Reset -->
+      <div style="display:flex; align-items:center; gap:8px;">
+        <div style="flex:1; height:2px; background:#fb7185; position:relative;">
+          <div style="position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:8px solid #fb7185;"></div>
+        </div>
+        <span style="font-size:14px; color:#fb7185; white-space:nowrap;">SELECT vacuum_statistics_reset()</span>
+      </div>
+
+    </div>
+
+    <!-- Extension side -->
+    <div style="flex:0 0 160px; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding-top:20px; gap:12px;">
+      <svg width="72" height="72" viewBox="0 0 48 48" fill="none">
+        <rect x="8" y="8" width="32" height="32" rx="8" fill="#4ade80" opacity=".3" stroke="#4ade80" stroke-width="2"/>
+        <text x="24" y="29" text-anchor="middle" fill="#4ade80" font-size="14" font-weight="bold">ext</text>
+      </svg>
+      <span style="font-size:16px; font-weight:700; color:#4ade80;">Extension</span>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 2: ext_vacuum_statistics + pg_profile integration
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>Integration: ext_vacuum_statistics + pg_profile</h1>
+  <p class="subtitle">Passive monitoring — stats accumulate silently, pg_profile snapshots them for historical reports</p>
+
+  <div class="flow">
+
+    <div class="box c-blue">
+      <div class="box-head">Autovacuum (background)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F30C;</span>
+          <div class="step-text">
+            <strong>Runs overnight</strong>
+            <div class="step-sub">Cycles through tables,<br>extension collects stats silently</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <div class="box c-green">
+      <div class="box-head">ext_vacuum_statistics</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4BE;</span>
+          <div class="step-text">
+            <strong>Cumulative counters in shared memory</strong>
+            <div class="step-sub">blks_read, wal_bytes, delay_time,<br>pages_scanned, tuples_frozen...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <div class="box c-purple">
+      <div class="box-head">pg_profile (cron)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4F8;</span>
+          <div class="step-text">
+            <strong>take_sample() every 30 min</strong>
+            <div class="step-sub">Snapshots vacuum stats views.<br>Stores deltas between samples.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <svg width="36" height="24" viewBox="0 0 36 24">
+        <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+        <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+      </svg>
+    </div>
+
+    <div class="box c-amber">
+      <div class="box-head">DBA in the morning</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x2615;</span>
+          <div class="step-text">
+            <strong>Opens HTML report</strong>
+            <div class="step-sub">Sees anomalies: WAL spike,<br>delay_time=95%, blks_read=2...<br>Root cause in 5 minutes.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 3: Pros & Cons
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>Pros &amp; Cons</h1>
+  <p class="subtitle">Honest assessment of the extension approach</p>
+
+  <div class="pc-grid">
+
+    <!-- Pros -->
+    <div class="pc-col" style="background:rgba(74,222,128,.04); border:2px solid #4ade80; border-radius:18px; padding:20px;">
+      <div style="font-size:16px; font-weight:700; color:#4ade80; margin-bottom:12px;">Pros</div>
+
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>Only 2 lines in core</strong>
+          <div class="sub">hook + pgstat_register_kind(). Minimal review burden.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>Zero overhead when disabled</strong>
+          <div class="sub">enabled=off → hook returns immediately, no locks, no shmem writes.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>Full pgstat lifecycle for free</strong>
+          <div class="sub">Persistence, cross-DB access, reset, LWLock — all from the framework.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>Surgical filtering with 6 GUCs</strong>
+          <div class="sub">Track only what you need. Runtime changes, no restart.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>prev_hook chaining</strong>
+          <div class="sub">Multiple extensions coexist safely. Additive, not exclusive.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>pg_stat_statements model</strong>
+          <div class="sub">Familiar pattern. Core fills struct, extension owns storage.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#4ade80;">&#x2705;</span>
+        <div class="pc-text">
+          <strong>Auto-cleanup on DROP</strong>
+          <div class="sub">OAT_DROP hook removes stale entries. No memory leaks.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cons -->
+    <div class="pc-col" style="background:rgba(251,113,133,.04); border:2px solid #fb7185; border-radius:18px; padding:20px;">
+      <div style="font-size:16px; font-weight:700; color:#fb7185; margin-bottom:12px;">Cons / Limitations</div>
+
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>Requires shared_preload_libraries</strong>
+          <div class="sub">Server restart needed to install. Can't add on a running cluster.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>pgstat hash has no size limit</strong>
+          <div class="sub">Unlike pg_stat_statements (has .max + eviction), pgstat entries persist until restart. 10K tables × 232 bytes ≈ 2.3 MB — acceptable but unbounded.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>Wall-clock timing includes waits</strong>
+          <div class="sub">total_time = real elapsed time (I/O wait + lock wait + OS scheduling). Not pure CPU/vacuum work time.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>Cumulative only — no per-run history</strong>
+          <div class="sub">Counters only grow. To see per-vacuum-cycle data, need pg_profile or external snapshotting.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>Crash loses recent stats</strong>
+          <div class="sub">pgstat flushes to disk on clean shutdown. Crash = some data lost. Same as built-in stats.</div>
+        </div>
+      </div>
+      <div class="pc-item">
+        <span class="pc-icon" style="color:#fb7185;">&#x26A0;</span>
+        <div class="pc-text">
+          <strong>Core patch still needed</strong>
+          <div class="sub">The hook itself (set_report_vacuum_hook) requires a 2-line core patch that must be accepted upstream.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 4: What pg_stat lacks today
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>What pg_stat Lacks Today vs. What the Extension Adds</h1>
+  <p class="subtitle">Side-by-side: built-in vacuum visibility vs. ext_vacuum_statistics</p>
+
+  <div class="flow" style="gap:20px;">
+
+    <div class="box c-red" style="flex:1;">
+      <div class="box-head">pg_stat_user_tables (today)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x2705;</span>
+          <div class="step-text"><strong>vacuum_count / autovacuum_count</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2705;</span>
+          <div class="step-text"><strong>n_dead_tup, last_vacuum</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No blks_read / blks_hit per vacuum</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No WAL generated per vacuum</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No timing breakdown</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No per-index vacuum stats</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No pages_scanned / tuples_frozen</strong></div>
+        </div>
+        <div class="step" style="color:#fb7185;">
+          <span class="step-icon">&#x274C;</span>
+          <div class="step-text"><strong>No delay_time (cost throttle visibility)</strong></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-green" style="flex:1;">
+      <div class="box-head">ext_vacuum_statistics (adds)</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>blks_read, blks_hit, blks_dirtied, blks_written</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>wal_records, wal_fpi, wal_bytes</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>total_time, delay_time, blk_read/write_time</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>Per-index: pages_deleted, tuples_deleted</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>pages_scanned, pages_removed</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>tuples_frozen, recently_dead, missed_dead</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>VM: new_visible, new_frozen pages</strong></div>
+        </div>
+        <div class="step">
+          <span class="step-icon">&#x2795;</span>
+          <div class="step-text"><strong>wraparound_failsafe_count, interrupts</strong></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 5: Use cases
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>Use Cases</h1>
+  <p class="subtitle">When ext_vacuum_statistics saves the day</p>
+
+  <div class="flow" style="gap:16px;">
+
+    <div class="box c-blue">
+      <div class="box-head" style="font-size:14px;">Autovacuum Tuning</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F527;</span>
+          <div class="step-text">
+            <strong>Is cost_delay too aggressive?</strong>
+            <div class="sub">Compare delay_time vs total_time.<br>If delay_time &gt; 80% → throttle is strangling vacuum.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-purple">
+      <div class="box-head" style="font-size:14px;">WAL Spike Investigation</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4C8;</span>
+          <div class="step-text">
+            <strong>Why did WAL spike at 3 AM?</strong>
+            <div class="sub">Check wal_bytes per table.<br>Find which vacuum generated 8× normal WAL.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-amber">
+      <div class="box-head" style="font-size:14px;">Wraparound Prevention</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x26A0;</span>
+          <div class="step-text">
+            <strong>Is freezing keeping up?</strong>
+            <div class="sub">Track tuples_frozen, vm_new_frozen_pages.<br>Spot tables falling behind.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box c-teal">
+      <div class="box-head" style="font-size:14px;">Index Bloat Detection</div>
+      <div class="box-body">
+        <div class="step">
+          <span class="step-icon">&#x1F4CA;</span>
+          <div class="step-text">
+            <strong>Which indexes cost the most?</strong>
+            <div class="sub">Per-index blks_read + pages_deleted.<br>Find candidates for REINDEX.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 6: Links & References
+     ══════════════════════════════════════════════════════════════ -->
+<div class="slide">
+  <h1>Links &amp; References</h1>
+  <p class="subtitle">&nbsp;</p>
+
+  <div class="box c-cyan" style="max-width:800px; margin:0 auto;">
+    <div class="box-body">
+      <div class="step">
+        <span class="step-icon">&#x1F4EC;</span>
+        <div class="step-text">
+          <strong>Mailing list thread</strong>
+          <div class="sub">postgresql.org/message-id/flat/de4bdbff-a86c-4830-82b1-0c14af2b597d@postgrespro.ru</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4E6;</span>
+        <div class="step-text">
+          <strong>Extension source</strong>
+          <div class="sub">contrib/ext_vacuum_statistics/</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4CA;</span>
+        <div class="step-text">
+          <strong>pg_profile</strong>
+          <div class="sub">github.com/zubkov-andrei/pg_profile — historic workload reports</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4D6;</span>
+        <div class="step-text">
+          <strong>pgstat custom kinds API</strong>
+          <div class="sub">src/include/utils/pgstat_internal.h — PgStat_KindInfo</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

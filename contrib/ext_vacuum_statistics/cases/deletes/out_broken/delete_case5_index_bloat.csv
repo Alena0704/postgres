@@ -1,0 +1,4 @@
+t_from,t_to,schemaname,relname,n_indexes,d_pages_scanned,d_table_tuples_deleted,d_idx_passes,d_idx_tuples_deleted,d_idx_pages_deleted,d_idx_blks_dirty,d_idx_wal_bytes,d_failsafe
+2026-04-26 11:30:29+03,2026-04-26 11:30:45+03,public,pgbench_accounts,1,88863,0,0,0,0,0,0,0
+2026-04-26 11:30:45+03,2026-04-26 11:30:57+03,public,pgbench_accounts,1,15144,0,0,0,0,0,0,0
+2026-04-26 14:01:28+03,2026-04-26 14:01:40+03,public,pgbench_accounts,1,105687,0,0,0,0,0,0,0

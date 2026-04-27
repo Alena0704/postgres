@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 40px;
+  }
+  .container { max-width: 700px; text-align: center; }
+  h1 { font-size: 36px; margin-bottom: 8px; }
+  .sub { color: #94a3b8; font-size: 16px; margin-bottom: 48px; }
+  .cards { display: flex; flex-direction: column; gap: 16px; }
+  a.card {
+    display: block; text-decoration: none; padding: 28px 32px;
+    background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+    border-left: 5px solid; text-align: left; transition: all .15s;
+  }
+  a.card:hover { background: #253348; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+  a.card h2 { font-size: 20px; margin-bottom: 4px; }
+  a.card p { font-size: 14px; color: #94a3b8; line-height: 1.5; }
+  a.card small { font-size: 12px; color: #64748b; }
+
+  .c1 { border-left-color: #3b82f6; }
+  .c1 h2 { color: #60a5fa; }
+  .c2 { border-left-color: #f59e0b; }
+  .c2 h2 { color: #fbbf24; }
+  .c3 { border-left-color: #a855f7; }
+  .c3 h2 { color: #c084fc; }
+  .c4 { border-left-color: #22d3ee; }
+  .c4 h2 { color: #22d3ee; }
+  .c5 { border-left-color: #fb7185; }
+  .c5 h2 { color: #fb7185; }
+  .c6 { border-left-color: #4ade80; }
+  .c6 h2 { color: #4ade80; }
+  .c7 { border-left-color: #a855f7; }
+  .c7 h2 { color: #a855f7; }
+  .c8 { border-left-color: #2dd4bf; }
+  .c8 h2 { color: #2dd4bf; }
+  .c9 { border-left-color: #818cf8; }
+  .c9 h2 { color: #818cf8; }
+  .c10 { border-left-color: #f59e0b; }
+  .c10 h2 { color: #f59e0b; }
+
+  .footer { margin-top: 40px; font-size: 12px; color: #475569; }
+  .footer a { color: #64748b; text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>ext_vacuum_statistics</h1>
+  <p class="sub">Architecture Documentation</p>
+
+  <div class="cards">
+    <a class="card c1" href="architecture_overview.html">
+      <h2>Layer 1: Overview</h2>
+      <p>
+        What PostgreSQL collects during VACUUM, how the extension intercepts that data
+        via hooks, and what it gives you. Written for everyone &mdash; no code knowledge needed.
+      </p>
+      <small>Audience: anyone</small>
+    </a>
+
+    <a class="card c2" href="architecture_dba.html">
+      <h2>Layer 2: DBA Guide</h2>
+      <p>
+        Installation, all GUC settings, whitelist management, SQL queries for statistics,
+        reset operations, memory usage, and persistence across restarts.
+      </p>
+      <small>Audience: database administrators</small>
+    </a>
+
+    <a class="card c3" href="architecture_internals.html">
+      <h2>Layer 3: Developer Internals</h2>
+      <p>
+        Shared memory layout, pgstat kinds &amp; key encoding, HTAB hash tables,
+        LWLock tranche, ACCUM_IF macro, filtering pipeline, output functions &mdash;
+        with struct names and line references.
+      </p>
+      <small>Audience: C developers</small>
+    </a>
+  </div>
+
+  <a class="card c4" href="architecture_vacuum_core.html">
+      <h2>VACUUM Core: How It Actually Works</h2>
+      <p>
+        Three phases of lazy vacuum, serial vs. parallel index vacuuming,
+        how stats flow from workers via DSM, double-counting prevention,
+        and exactly where the hook fires (with line numbers).
+      </p>
+      <small>Audience: developers &amp; anyone curious about vacuum internals</small>
+    </a>
+
+    <a class="card c5" href="vacuum_slide.html">
+      <h2>Slide 1: VACUUM Phases</h2>
+      <p>
+        Horizontal layout. Three phases with hook call points,
+        parallel vacuum, double-counting prevention.
+      </p>
+      <small>Audience: presentation / talk</small>
+    </a>
+
+    <a class="card c6" href="vacuum_slide_2.html">
+      <h2>Slide 2: About the Extension</h2>
+      <p>
+        How the extension collects, stores, persists, and serves vacuum statistics.
+      </p>
+      <small>Audience: presentation / talk</small>
+    </a>
+
+    <a class="card c7" href="vacuum_slide_pgstat.html">
+      <h2>Slide 3: Cumulative Statistics &amp; Custom Kinds</h2>
+      <p>
+        What is pgstat, how the shared hash table works,
+        disk persistence, and how extensions register custom kinds.
+      </p>
+      <small>Audience: presentation / talk</small>
+    </a>
+
+    <a class="card c8" href="vacuum_slide_pgstat_deep.html">
+      <h2>Slide 4: Cumulative Stats Collector Inside</h2>
+      <p>
+        Write path (local &rarr; pending &rarr; shared), flush timing (~1s throttle / 60s force),
+        key functions, and how ext_vacuum_statistics differs (direct write, no pending).
+      </p>
+      <small>Audience: presentation / talk (developer-focused)</small>
+    </a>
+
+    <a class="card c9" href="vacuum_slide_hash.html">
+      <h2>Slide 5: Shared Hash Table Visualization</h2>
+      <p>
+        Visual representation of the dshash table with built-in and custom entries side by side.
+      </p>
+      <small>Audience: presentation / talk</small>
+    </a>
+
+    <a class="card c10" href="vacuum_slide_extras.html">
+      <h2>Extra Slides: Interaction, Pros/Cons, Use Cases</h2>
+      <p>
+        DBA ↔ extension interaction diagram, pg_profile integration,
+        pros &amp; cons, what pg_stat lacks, use cases, references.
+      </p>
+      <small>Audience: presentation / talk</small>
+    </a>
+  </div>
+
+  <p class="footer">
+    Combined single-page version:
+    <a href="architecture_combined.html">architecture_combined.html</a>
+  </p>
+</div>
+</body>
+</html>

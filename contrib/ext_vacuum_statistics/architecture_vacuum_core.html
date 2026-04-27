@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>How VACUUM Works in PostgreSQL &amp; How Stats Are Collected</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --blue: #3b82f6; --purple: #a855f7; --cyan: #22d3ee;
+    --green: #4ade80; --amber: #f59e0b; --pink: #f472b6;
+    --orange: #fb923c; --red: #ef4444; --teal: #2dd4bf;
+    --lime: #a3e635; --sky: #38bdf8; --rose: #fb7185;
+    --indigo: #818cf8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+  .nav {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: center; align-items: center; gap: 0;
+    background: #020617; border-bottom: 1px solid var(--bg3);
+  }
+  .nav a {
+    padding: 16px 28px; font-size: 13px; font-weight: 600;
+    color: var(--muted); text-decoration: none; border-bottom: 3px solid transparent;
+    transition: all .2s; text-align: center; line-height: 1.3;
+  }
+  .nav a:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .nav a.active { color: #fff; border-bottom-color: var(--cyan); }
+  .nav a small { display: block; font-weight: 400; font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+  .content { padding: 40px 32px 80px; max-width: 1300px; margin: 0 auto; }
+
+  h1 { font-size: 30px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 48px 0 16px; color: #fff; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 16px; margin-bottom: 8px; }
+  p, li { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .lead { font-size: 15px; color: var(--muted); margin-bottom: 32px; line-height: 1.6; }
+
+  .card {
+    background: var(--bg2); border: 1px solid var(--bg3); border-radius: 16px;
+    padding: 24px 28px; margin-bottom: 20px;
+  }
+  .card-accent { border-left: 4px solid; }
+  .card ul { padding-left: 20px; margin-top: 8px; }
+  .card li { margin-bottom: 4px; }
+  code {
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 2px 7px;
+    border-radius: 4px; color: #7dd3fc; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  .callout {
+    background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout strong { color: var(--cyan); }
+  .callout-warn {
+    background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout-warn strong { color: var(--amber); }
+  .callout-red {
+    background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout-red strong { color: var(--red); }
+
+  .sep { border: none; border-top: 1px solid var(--bg3); margin: 48px 0; }
+
+  /* tags */
+  .tag {
+    display: inline-block; font-size: 10px; padding: 2px 10px;
+    border-radius: 20px; font-weight: 700; margin-right: 4px; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .tag-phase1 { background: rgba(56,189,248,.15); color: var(--sky); }
+  .tag-phase2 { background: rgba(168,85,247,.15); color: var(--purple); }
+  .tag-phase3 { background: rgba(251,113,133,.15); color: var(--rose); }
+  .tag-hook   { background: rgba(74,222,128,.15); color: var(--green); }
+  .tag-par    { background: rgba(245,158,11,.15); color: var(--amber); }
+
+  /* diagram */
+  .dia { text-align: center; margin: 24px auto; max-width: 1100px; }
+  .dia-row { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .dia-box {
+    border-radius: 12px; padding: 14px 16px; text-align: center;
+    font-size: 12px; line-height: 1.5; position: relative;
+  }
+  .dia-box h4 { font-size: 12px; margin-bottom: 4px; font-weight: 700; }
+  .dia-box p  { font-size: 11px; color: var(--muted); }
+  .dia-box ul { font-size: 11px; text-align: left; padding-left: 14px; color: var(--muted); }
+  .dia-box code { font-size: 10px; }
+
+  .d-heap   { background: #162a4a; border: 2px solid var(--sky); }
+  .d-idx    { background: #2a1650; border: 2px solid var(--purple); }
+  .d-reap   { background: #3a1525; border: 2px solid var(--rose); }
+  .d-hook   { background: #1c3322; border: 2px solid var(--green); }
+  .d-par    { background: #2d2215; border: 2px solid var(--amber); }
+  .d-dsm    { background: #1a2a2a; border: 2px solid var(--teal); }
+  .d-leader { background: #1e293b; border: 2px solid var(--indigo); }
+  .d-worker { background: #2d1e10; border: 2px solid var(--orange); }
+  .d-ext    { background: #1a3322; border: 2px dashed var(--green); }
+  .d-core   { background: #1e3a5f; border: 2px solid var(--blue); }
+  .d-stats  { background: #2a2010; border: 2px solid var(--amber); }
+
+  .arrow {
+    display: flex; justify-content: center; align-items: center;
+    height: 36px; position: relative;
+  }
+  .arrow::before { content: ''; width: 2px; height: 18px; background: var(--dim); }
+  .arrow::after {
+    content: ''; position: absolute; bottom: 4px;
+    border-left: 6px solid transparent; border-right: 6px solid transparent;
+    border-top: 8px solid var(--dim);
+  }
+  .arrow-label {
+    position: absolute; font-size: 10px; color: var(--muted); white-space: nowrap;
+  }
+  .arrow-label.right { left: calc(50% + 16px); }
+  .arrow-label.left  { right: calc(50% + 16px); text-align: right; }
+
+  /* horizontal arrow */
+  .harrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; position: relative; flex-shrink: 0;
+  }
+  .harrow::before { content: ''; height: 2px; width: 22px; background: var(--dim); }
+  .harrow::after {
+    content: ''; position: absolute; right: 4px;
+    border-top: 6px solid transparent; border-bottom: 6px solid transparent;
+    border-left: 8px solid var(--dim);
+  }
+  .harrow-back::after {
+    right: auto; left: 4px;
+    border-left: none;
+    border-right: 8px solid var(--dim);
+  }
+
+  /* file ref */
+  .fref { font-size: 11px; color: var(--dim); font-style: italic; margin-bottom: 6px; }
+
+  /* phase badge */
+  .phase-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 700; padding: 6px 16px;
+    border-radius: 24px; margin-bottom: 12px;
+  }
+  .pb-1 { background: rgba(56,189,248,.12); color: var(--sky); border: 1px solid rgba(56,189,248,.3); }
+  .pb-2 { background: rgba(168,85,247,.12); color: var(--purple); border: 1px solid rgba(168,85,247,.3); }
+  .pb-3 { background: rgba(251,113,133,.12); color: var(--rose); border: 1px solid rgba(251,113,133,.3); }
+  .pb-h { background: rgba(74,222,128,.12); color: var(--green); border: 1px solid rgba(74,222,128,.3); }
+
+  /* code block */
+  .code-block {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11px; background: rgba(0,0,0,.4); padding: 14px 16px;
+    border-radius: 8px; margin: 10px 0; line-height: 1.7; overflow-x: auto;
+  }
+
+  /* memory layout */
+  .mem-block {
+    display: flex; align-items: stretch; border-radius: 8px; overflow: hidden;
+    margin: 8px 0; font-size: 12px;
+  }
+  .mem-block .field {
+    padding: 8px 12px; border-right: 1px solid rgba(0,0,0,.3);
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .mem-block .field:last-child { border-right: none; }
+  .mem-block .field-name { font-weight: 600; font-size: 11px; }
+  .mem-block .field-size { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* parallel diagram specific */
+  .par-container {
+    display: flex; gap: 16px; align-items: flex-start; margin: 24px 0;
+  }
+  .par-column { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+  .par-column-label {
+    text-align: center; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 2px; color: var(--dim); margin-bottom: 4px;
+  }
+
+  /* worker boxes */
+  .worker-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px; margin: 12px 0;
+  }
+  .worker-box {
+    border-radius: 10px; padding: 12px; text-align: center; font-size: 11px;
+  }
+  .worker-box h5 { font-size: 11px; margin-bottom: 4px; }
+  .worker-box p { font-size: 10px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a href="architecture_overview.html">
+    Overview
+    <small>for everyone</small>
+  </a>
+  <a href="architecture_dba.html">
+    DBA Guide
+    <small>configuration &amp; usage</small>
+  </a>
+  <a href="architecture_internals.html">
+    Internals
+    <small>for developers</small>
+  </a>
+  <a class="active" href="architecture_vacuum_core.html">
+    VACUUM Core
+    <small>how vacuum &amp; stats work</small>
+  </a>
+</div>
+
+<div class="content">
+
+<h1>How VACUUM Works &amp; How Stats Are Collected</h1>
+<p class="lead">
+  A detailed walkthrough of PostgreSQL's lazy vacuum process: three phases,
+  serial vs. parallel index vacuuming, how <code>PgStat_VacuumRelationCounts</code>
+  is populated, and how the hook delivers data to extensions.
+  Special attention to parallel index stats collection and the
+  double-counting prevention mechanism.
+</p>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 1: HIGH-LEVEL OVERVIEW
+     ══════════════════════════════════════════════════════════════ -->
+<h2>The Three Phases of Lazy Vacuum</h2>
+<div class="fref">src/backend/access/heap/vacuumlazy.c &mdash; heap_vacuum_rel()</div>
+
+<p>PostgreSQL's lazy vacuum processes a single table (relation) in three sequential phases.
+   Each phase can loop multiple times if the dead items buffer fills up mid-scan.</p>
+
+<div class="dia">
+  <div class="dia-row">
+    <div class="dia-box d-heap" style="min-width:280px;">
+      <h4 style="color:var(--sky);">1. Сканируем таблицу</h4>
+      <p><code>lazy_scan_heap()</code></p>
+      <p>Чистим мёртвые строки, замораживаем старые,<br>обновляем visibility map,<br>собираем TID-ы удалённых строк</p>
+    </div>
+    <div class="harrow"></div>
+    <div class="dia-box d-idx" style="min-width:280px;">
+      <h4 style="color:var(--purple);">2. Чистим индексы</h4>
+      <p><code>lazy_vacuum_all_indexes()</code></p>
+      <p>Удаляем из индексов записи,<br>указывающие на мёртвые строки.<br>Последовательно или параллельно.</p>
+    </div>
+    <div class="harrow"></div>
+    <div class="dia-box d-reap" style="min-width:280px;">
+      <h4 style="color:var(--rose);">3. Освобождаем место в таблице</h4>
+      <p><code>lazy_vacuum_heap_rel()</code></p>
+      <p>Второй проход по таблице:<br>помечаем слоты как свободные,<br>место можно переиспользовать.</p>
+    </div>
+  </div>
+</div>
+
+<div class="callout">
+  <strong>Loop:</strong> If Phase I fills the TidStore (dead items buffer) before scanning all pages,
+  phases II &amp; III run on the collected batch, then Phase I resumes from where it left off.
+  This cycle repeats until the entire table is scanned.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 2: PHASE I DETAIL
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<div class="phase-badge pb-1">Phase I &mdash; Heap Scan &amp; Pruning</div>
+<div class="fref">vacuumlazy.c : lazy_scan_heap() ~line 437</div>
+
+<div class="card card-accent" style="border-left-color: var(--sky);">
+  <h3 style="color:var(--sky);">What happens page by page</h3>
+  <p style="margin-top:8px;">
+    VACUUM reads every page of the table sequentially (using a ring buffer strategy to avoid
+    evicting the shared buffer cache). For each page:
+  </p>
+  <ul>
+    <li><strong>Pruning:</strong> Removes dead row versions (tuples deleted or updated by committed transactions).
+        Line pointers are set to LP_DEAD.</li>
+    <li><strong>Freezing:</strong> Advances tuple <code>xmin</code>/<code>xmax</code> to prevent
+        transaction ID wraparound. Counter: <code>vacrel->tuples_frozen</code>.</li>
+    <li><strong>Dead TID collection:</strong> LP_DEAD items are recorded in <code>vacrel->dead_items</code>
+        (a TidStore). These TIDs will be removed from indexes in Phase II.</li>
+    <li><strong>Visibility map:</strong> Pages where all tuples are visible (or frozen) get their
+        VM bits set. Counters: <code>new_all_visible_pages</code>, <code>new_all_frozen_pages</code>.</li>
+  </ul>
+  <p style="margin-top:12px;">
+    <strong>Counters populated:</strong>
+  </p>
+  <div class="grid3" style="margin-top:8px;">
+    <div style="font-size:12px;">
+      <strong style="color:var(--sky);">Pages</strong><br>
+      <code>scanned_pages</code><br>
+      <code>removed_pages</code>
+    </div>
+    <div style="font-size:12px;">
+      <strong style="color:var(--sky);">Tuples</strong><br>
+      <code>tuples_deleted</code><br>
+      <code>tuples_frozen</code><br>
+      <code>recently_dead_tuples</code><br>
+      <code>missed_dead_tuples</code>
+    </div>
+    <div style="font-size:12px;">
+      <strong style="color:var(--sky);">Visibility Map</strong><br>
+      <code>new_all_visible_pages</code><br>
+      <code>new_all_visible_all_frozen_pages</code><br>
+      <code>new_all_frozen_pages</code>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 3: PHASE II — SERIAL INDEX VACUUM
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<div class="phase-badge pb-2">Phase II &mdash; Index Vacuuming (Serial Path)</div>
+<div class="fref">vacuumlazy.c : lazy_vacuum_all_indexes() ~line 2700, lazy_vacuum_one_index() ~line 3220</div>
+
+<div class="card card-accent" style="border-left-color: var(--purple);">
+  <h3 style="color:var(--purple);">Serial mode: one index at a time</h3>
+  <p style="margin-top:8px;">
+    When <code>ParallelVacuumIsActive(vacrel)</code> is false, the leader process vacuums
+    each index sequentially in a loop:
+  </p>
+  <div class="code-block">
+<span style="color:var(--cyan);">for</span> (idx = 0; idx &lt; vacrel-&gt;nindexes; idx++) {
+  vacrel-&gt;indstats[idx] = <span style="color:var(--amber);">lazy_vacuum_one_index</span>(indrel, istat, ...);
+}
+  </div>
+  <p style="margin-top:8px;">
+    For each index, <code>lazy_vacuum_one_index()</code> does:
+  </p>
+  <ul>
+    <li>Snapshots buffer/WAL counters: <code>extvac_stats_start_idx()</code></li>
+    <li>Calls <code>vac_bulkdel_one_index()</code> &mdash; delegates to the index AM's <code>ambulkdelete</code></li>
+    <li>The index AM scans its pages, removes entries matching dead TIDs, returns <code>IndexBulkDeleteResult</code> with <code>pages_deleted</code>, <code>tuples_removed</code></li>
+    <li>Computes differential stats: <code>extvac_stats_end_idx()</code></li>
+    <li><strong>Calls hook:</strong> <code>pgstat_report_vacuum_ext(indrel, ...)</code> &mdash; reports per-index stats</li>
+    <li><strong>Accumulates:</strong> <code>accumulate_idxs_vacuum_statistics()</code> &mdash; sums index I/O into <code>vacrel->extVacReportIdx</code> for later subtraction from heap stats</li>
+  </ul>
+</div>
+
+<div class="callout-warn">
+  <strong>Double-counting prevention:</strong> Buffer I/O and WAL counters are process-global
+  (from <code>pgBufferUsage</code> / <code>pgWalUsage</code>). Since index vacuuming happens
+  <em>during</em> the same vacuum operation as heap scanning, the heap stats would include
+  index I/O too. To fix this, <code>accumulate_idxs_vacuum_statistics()</code> sums all index
+  buffer/WAL/timing stats into <code>vacrel->extVacReportIdx</code>, and later
+  <code>accumulate_heap_vacuum_statistics()</code> <strong>subtracts</strong> them from the heap report.
+</div>
+
+<!-- Diagram: serial index vacuum flow -->
+<div class="dia" style="margin-top:24px;">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin-bottom:8px;">
+    Последовательная чистка индекса &mdash; для каждого индекса
+  </div>
+
+  <div class="dia-row">
+    <div class="dia-box d-core" style="min-width:280px;">
+      <h4 style="color:var(--blue);">Запоминаем текущие счётчики</h4>
+      <p><code>extvac_stats_start_idx()</code></p>
+      <p>Снимок <code>pgBufferUsage</code>, <code>pgWalUsage</code>,<br>
+      <code>pages_deleted</code>, <code>tuples_removed</code></p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="dia-row">
+    <div class="dia-box d-idx" style="min-width:280px;">
+      <h4 style="color:var(--purple);">Чистим индекс (bulk delete)</h4>
+      <p><code>vac_bulkdel_one_index()</code></p>
+      <p>Index AM удаляет записи.<br>
+      Возвращает <code>IndexBulkDeleteResult</code>:<br>
+      <code>pages_deleted</code>, <code>tuples_removed</code></p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="dia-row">
+    <div class="dia-box d-core" style="min-width:340px;">
+      <h4 style="color:var(--blue);">Считаем разницу</h4>
+      <p><code>extvac_stats_end_idx()</code></p>
+      <p>Дельта: <code>pages_deleted = текущее - снимок</code><br>
+      <code>tuples_deleted = текущее - снимок</code><br>
+      Buffer/WAL: <code>текущее - снимок</code></p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+  <div class="dia-row" style="gap:12px;">
+    <div class="dia-box d-hook" style="flex:1; max-width:260px;">
+      <h4 style="color:var(--green);">Отправляем отчёт по индексу</h4>
+      <p><code>pgstat_report_vacuum_ext()</code><br>
+      <strong>Hook &darr;</strong> <code>set_report_vacuum_hook</code></p>
+    </div>
+    <div class="dia-box d-stats" style="flex:1; max-width:260px;">
+      <h4 style="color:var(--amber);">Копим I/O индексов</h4>
+      <p><code>accumulate_idxs_vacuum_statistics()</code><br>
+      Суммируем buffer/WAL индекса<br>
+      для вычитания из heap позже</p>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <span class="arrow-label right" style="color:var(--green);">Отчёт INDEX &rarr; расширению</span>
+  </div>
+
+  <div class="dia-row">
+    <div class="dia-box d-ext" style="min-width:440px;">
+      <h4 style="color:var(--green);">ext_vacuum_statistics принимает отчёт</h4>
+      <p>type = <code>PGSTAT_EXTVAC_INDEX</code> &rarr; сохраняет <code>pages_deleted</code>, <code>tuples_deleted</code>,<br>
+      buffer I/O, WAL, timing в pgstat entry этого индекса</p>
+    </div>
+  </div>
+</div>
+
+<!-- Why two phases -->
+<div class="card card-accent" style="margin-top:16px; border-left-color: var(--purple);">
+  <h3 style="color:var(--purple); font-size:14px;">Почему чистка индексов двухфазная?</h3>
+  <p style="margin-top:8px;">
+    Индекс чистится в два прохода &mdash; <strong>bulk delete</strong> и <strong>cleanup</strong> &mdash; потому что
+    это разные виды работы:
+  </p>
+  <ul>
+    <li><strong>Bulk delete</strong> (<code>ambulkdelete</code>) &mdash; удаляет конкретные записи, указывающие на
+        мёртвые строки. Вызывается <em>до</em> того, как heap освободит слоты (Phase III), иначе
+        индекс будет указывать на мусор. Может вызываться <strong>несколько раз</strong> за один VACUUM,
+        если мёртвых строк больше, чем влезает в TidStore.</li>
+    <li><strong>Cleanup</strong> (<code>amvacuumcleanup</code>) &mdash; финальная доработка: для btree это
+        удаление полностью пустых страниц (half-dead &rarr; deleted), обновление <code>metapage</code>
+        и возврат статистики (<code>num_pages</code>, <code>num_index_tuples</code>).
+        Вызывается <strong>один раз</strong> в самом конце, после всех циклов heap scan.</li>
+  </ul>
+  <p style="margin-top:8px;">
+    Hook вызывается <strong>после каждого прохода</strong>, поэтому на один индекс приходится
+    минимум 2 отчёта: один от bulk delete, один от cleanup. Расширение накапливает оба
+    в одну и ту же pgstat entry.
+  </p>
+</div>
+<div class="fref" style="margin-top:12px;">vacuumlazy.c : lazy_cleanup_one_index() ~line 3282, lazy_cleanup_all_indexes() ~line 3151</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 4: PARALLEL INDEX VACUUM
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<div class="phase-badge pb-2">Phase II &mdash; Parallel Index Vacuuming</div>
+<div class="fref">src/backend/commands/vacuumparallel.c</div>
+
+<div class="card card-accent" style="border-left-color: var(--amber);">
+  <h3 style="color:var(--amber);">When does parallel vacuum kick in?</h3>
+  <p style="margin-top:8px;">
+    If the table has multiple indexes and <code>max_parallel_maintenance_workers > 0</code>,
+    PostgreSQL launches worker processes to vacuum indexes in parallel. The leader calls
+    <code>parallel_vacuum_bulkdel_all_indexes()</code> instead of the serial loop.
+  </p>
+  <p style="margin-top:8px;">
+    <strong>Key point:</strong> Only index vacuuming is parallelized. Heap scanning (Phase I)
+    and heap vacuuming (Phase III) are always single-process.
+  </p>
+</div>
+
+<!-- Big parallel diagram -->
+<h3 style="margin-top:24px;">Parallel Vacuum Architecture</h3>
+
+<div class="par-container">
+  <!-- Left: Leader -->
+  <div class="par-column" style="max-width:320px;">
+    <div class="par-column-label" style="color:var(--indigo);">Leader (основной процесс)</div>
+
+    <div class="dia-box d-leader" style="width:100%;">
+      <h4 style="color:var(--indigo);">Создаём общую память (DSM)</h4>
+      <p><code>parallel_vacuum_init()</code></p>
+      <p>&bull; <code>PVIndStats[]</code> &mdash; слот на каждый индекс<br>
+      &bull; <code>BufferUsage[]</code> / <code>WalUsage[]</code> &mdash; на каждого воркера<br>
+      &bull; <code>TidStore</code> &mdash; мёртвые TID-ы из фазы 1</p>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label right">запускаем воркеров</span>
+    </div>
+
+    <div class="dia-box d-leader" style="width:100%;">
+      <h4 style="color:var(--indigo);">Раздаём индексы</h4>
+      <p><code>parallel_vacuum_process_all_indexes()</code></p>
+      <p>Помечаем индексы как NEED_BULKDELETE.<br>
+      Запускаем N воркеров.<br>
+      Leader чистит "небезопасные" индексы сам,<br>
+      потом подключается как воркер.</p>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label right">ждём завершения воркеров</span>
+    </div>
+
+    <div class="dia-box d-leader" style="width:100%; border-color:var(--green);">
+      <h4 style="color:var(--green);">Собираем статистики воркеров</h4>
+      <p><code>InstrAccumParallelQuery()</code><br>
+      Мержим buffer/WAL каждого воркера<br>
+      в глобальные счётчики leader-а.</p>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-box d-leader" style="width:100%; border-color:var(--teal);">
+      <h4 style="color:var(--teal);">Забираем результаты из DSM</h4>
+      <p><code>parallel_vacuum_end()</code><br>
+      Копируем <code>IndexBulkDeleteResult</code><br>
+      из DSM-слотов в локальную память.<br>
+      Уничтожаем DSM.</p>
+    </div>
+  </div>
+
+  <!-- Middle: DSM -->
+  <div class="par-column" style="max-width:260px;">
+    <div class="par-column-label" style="color:var(--teal);">Общая память (DSM)</div>
+
+    <div class="dia-box d-dsm" style="width:100%;">
+      <h4 style="color:var(--teal);">Атомарный счётчик</h4>
+      <p><code>pg_atomic_uint32 idx</code><br>
+      Воркеры делают fetch-and-add<br>
+      чтобы забрать следующий индекс</p>
+    </div>
+
+    <div style="height:8px;"></div>
+
+    <div class="dia-box d-dsm" style="width:100%;">
+      <h4 style="color:var(--teal);">Слоты индексов</h4>
+      <p><code>PVIndStats[nindexes]</code><br>
+      Статус + результат чистки:<br>
+      <code>pages_deleted</code>, <code>tuples_removed</code><br>
+      Каждый воркер пишет в свой слот &mdash;<br>
+      <strong>блокировки не нужны</strong></p>
+    </div>
+
+    <div style="height:8px;"></div>
+
+    <div class="dia-box d-dsm" style="width:100%;">
+      <h4 style="color:var(--teal);">Счётчики воркеров</h4>
+      <p><code>BufferUsage[nworkers]</code><br>
+      <code>WalUsage[nworkers]</code><br>
+      Каждый воркер пишет в свою ячейку</p>
+    </div>
+
+    <div style="height:8px;"></div>
+
+    <div class="dia-box d-dsm" style="width:100%;">
+      <h4 style="color:var(--teal);">Мёртвые TID-ы (только чтение)</h4>
+      <p><code>TidStore</code> из фазы 1.<br>
+      Воркеры только читают &mdash;<br>
+      нет конкуренции за доступ.</p>
+    </div>
+  </div>
+
+  <!-- Right: Workers -->
+  <div class="par-column" style="max-width:360px;">
+    <div class="par-column-label" style="color:var(--orange);">Воркеры</div>
+
+    <div class="dia-box d-worker" style="width:100%;">
+      <h4 style="color:var(--orange);">Стартуем</h4>
+      <p><code>parallel_vacuum_main()</code><br>
+      Открываем таблицу и все индексы.<br>
+      Подключаемся к общему TidStore.</p>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-box d-worker" style="width:100%;">
+      <h4 style="color:var(--orange);">Берём следующий индекс</h4>
+      <p><code>atomic_fetch_add(&amp;shared->idx, 1)</code><br>
+      Если индекс "безопасен" для параллельной<br>
+      работы &rarr; чистим его</p>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-box d-worker" style="width:100%;">
+      <h4 style="color:var(--orange);">Чистим один индекс</h4>
+      <p style="text-align:left; padding-left:8px;">
+        1. Снимок счётчиков<br>
+        2. Index AM удаляет записи<br>
+        3. Считаем дельту<br>
+        4. Копируем результат в DSM-слот<br>
+        5. Готово
+      </p>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label right" style="color:var(--green);">hook прямо в воркере!</span>
+    </div>
+
+    <div class="dia-box d-ext" style="width:100%;">
+      <h4 style="color:var(--green);">Отправляем отчёт по индексу</h4>
+      <p><code>pgstat_report_vacuum_ext()</code><br>
+      <strong>Hook вызывается в воркере</strong><br>
+      INDEX report &rarr; ext_vacuum_statistics<br>
+      пишем через <code>pgstat_get_entry_ref_locked()</code></p>
+    </div>
+  </div>
+</div>
+
+<div class="callout-red">
+  <strong>Critical detail for ext_vacuum_statistics:</strong>
+  In parallel vacuum, the hook <code>set_report_vacuum_hook</code> is called
+  <strong>inside the worker process</strong>, not the leader.
+  This means the extension's <code>pgstat_report_vacuum_extstats()</code> runs
+  in a separate process. The extension must use shared pgstat entries
+  (not backend-local memory) to store stats &mdash; which it does via
+  <code>pgstat_get_entry_ref_locked()</code>.
+</div>
+
+<div class="callout-warn">
+  <strong>Buffer/WAL stats in parallel:</strong>
+  Workers don't call <code>accumulate_idxs_vacuum_statistics()</code> (that's leader-only, serial path).
+  Instead, each worker's <code>BufferUsage</code> and <code>WalUsage</code> are stored in
+  dedicated DSM slots. After all workers finish, the leader merges them with
+  <code>InstrAccumParallelQuery()</code>. This means the heap stats subtraction
+  (<code>heap_stats -= idx_stats</code>) does <strong>not</strong> happen for parallel indexes &mdash;
+  the buffer/WAL counters from workers are already separate from the leader's
+  heap scanning counters.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 5: PHASE III
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<div class="phase-badge pb-3">Phase III &mdash; Heap Vacuuming (Reaping)</div>
+<div class="fref">vacuumlazy.c : lazy_vacuum_heap_rel() ~line 2846</div>
+
+<div class="card card-accent" style="border-left-color: var(--rose);">
+  <h3 style="color:var(--rose);">Reclaiming dead space in the heap</h3>
+  <p style="margin-top:8px;">
+    Now that indexes no longer reference the dead TIDs, VACUUM makes a second pass
+    over the heap pages (using the TidStore as a guide). For each page containing dead TIDs:
+  </p>
+  <ul>
+    <li>LP_DEAD line pointers are set to LP_UNUSED (space is reclaimable)</li>
+    <li>Page is marked dirty, WAL record written</li>
+    <li>If the entire page is now empty, it can be truncated from the end of the relation</li>
+  </ul>
+  <p style="margin-top:8px;">
+    This phase generates additional buffer I/O and WAL that is part of the heap stats
+    (not index stats).
+  </p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 6: HOOK CALL & STATS REPORT
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<div class="phase-badge pb-h">Stats Report &amp; Hook Call</div>
+<div class="fref">vacuumlazy.c ~line 1179, pgstat_relation.c : pgstat_report_vacuum_ext() ~line 287</div>
+
+<div class="card card-accent" style="border-left-color: var(--green);">
+  <h3 style="color:var(--green);">When and where the hook fires</h3>
+  <p style="margin-top:8px;">
+    The hook <code>set_report_vacuum_hook</code> is called from <strong>4 code locations</strong>.
+    For each index, the hook fires <strong>twice</strong> (bulkdelete + cleanup).
+    For the table &mdash; <strong>once</strong> at the very end.
+    So for a table with N indexes: <strong>2&times;N + 1</strong> hook calls total.
+  </p>
+  <div style="overflow-x:auto; margin-top:12px;">
+    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:8px 12px; background:rgba(0,0,0,.3); color:var(--muted); border-bottom:1px solid var(--bg3); font-size:11px;">Where</th>
+          <th style="text-align:left; padding:8px 12px; background:rgba(0,0,0,.3); color:var(--muted); border-bottom:1px solid var(--bg3); font-size:11px;">Type</th>
+          <th style="text-align:left; padding:8px 12px; background:rgba(0,0,0,.3); color:var(--muted); border-bottom:1px solid var(--bg3); font-size:11px;">Process</th>
+          <th style="text-align:left; padding:8px 12px; background:rgba(0,0,0,.3); color:var(--muted); border-bottom:1px solid var(--bg3); font-size:11px;">When / What's reported</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.05);">
+          <td style="padding:8px 12px;"><code>lazy_vacuum_one_index()</code><br><span style="color:var(--dim);">vacuumlazy.c:3260</span></td>
+          <td style="padding:8px 12px;"><span class="tag tag-phase2">INDEX</span> bulkdelete</td>
+          <td style="padding:8px 12px;">Leader (serial)</td>
+          <td style="padding:8px 12px;">During Phase II, per index. pages_deleted, tuples_deleted, buffer/WAL</td>
+        </tr>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.05);">
+          <td style="padding:8px 12px;"><code>lazy_cleanup_one_index()</code><br><span style="color:var(--dim);">vacuumlazy.c:3322</span></td>
+          <td style="padding:8px 12px;"><span class="tag tag-phase2">INDEX</span> cleanup</td>
+          <td style="padding:8px 12px;">Leader (serial)</td>
+          <td style="padding:8px 12px;">After Phase III (<code>lazy_cleanup_all_indexes</code>), per index. Same fields</td>
+        </tr>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.05);">
+          <td style="padding:8px 12px;"><code>parallel_vacuum_process_one_index()</code><br><span style="color:var(--dim);">vacuumparallel.c:1123</span></td>
+          <td style="padding:8px 12px;"><span class="tag tag-par">INDEX</span> parallel</td>
+          <td style="padding:8px 12px;"><strong style="color:var(--orange);">Worker</strong></td>
+          <td style="padding:8px 12px;">Same as serial, but hook fires in the worker process. Both bulkdelete &amp; cleanup</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 12px;"><code>heap_vacuum_rel()</code><br><span style="color:var(--dim);">vacuumlazy.c:1184</span></td>
+          <td style="padding:8px 12px;"><span class="tag tag-phase1">TABLE</span> heap</td>
+          <td style="padding:8px 12px;">Leader</td>
+          <td style="padding:8px 12px;">Once, at the very end. All heap counters <em>minus</em> serial index I/O</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout-warn" style="margin-top:16px;">
+    <strong>Example: table with 1 index</strong> &rarr; 3 hook calls:
+    INDEX bulkdelete + INDEX cleanup + TABLE = <strong>2 index + 1 table = 3</strong>.
+    The extension accumulates both index calls into the same pgstat entry for that index.
+  </div>
+</div>
+
+<!-- Stats subtraction diagram -->
+<h3 style="margin-top:28px;">Double-Counting Prevention (Serial Path)</h3>
+
+<div class="dia">
+  <div class="dia-row" style="gap:8px;">
+    <div class="dia-box d-core" style="flex:1; max-width:240px;">
+      <h4 style="color:var(--blue);">Process-global counters</h4>
+      <p><code>pgBufferUsage</code> / <code>pgWalUsage</code><br>
+      Increment during ALL vacuum work<br>
+      (heap + indexes combined)</p>
+    </div>
+    <div class="dia-box d-stats" style="flex:1; max-width:240px;">
+      <h4 style="color:var(--amber);">extVacReportIdx (accumulator)</h4>
+      <p>Sum of all index buffer/WAL stats<br>
+      collected via<br><code>accumulate_idxs_vacuum_statistics()</code></p>
+    </div>
+    <div class="dia-box d-hook" style="flex:1; max-width:240px;">
+      <h4 style="color:var(--green);">Heap report (final)</h4>
+      <p><code>heap_buffers = total - idx_sum</code><br>
+      <code>heap_wal = total - idx_sum</code><br>
+      <code>heap_time = total - idx_sum</code><br>
+      <strong>Lines 655-666</strong></p>
+    </div>
+  </div>
+</div>
+
+<div class="code-block" style="max-width:700px; margin:16px auto;">
+  <span style="color:var(--dim);">/* accumulate_heap_vacuum_statistics(), lines 655-666 */</span><br>
+  <span style="color:var(--dim);">/* Subtract index stats from heap to avoid double-counting */</span><br>
+  extVacStats-&gt;common.total_blks_read <span style="color:var(--rose);">-=</span> vacrel-&gt;extVacReportIdx.common.total_blks_read;<br>
+  extVacStats-&gt;common.total_blks_hit  <span style="color:var(--rose);">-=</span> vacrel-&gt;extVacReportIdx.common.total_blks_hit;<br>
+  extVacStats-&gt;common.wal_records     <span style="color:var(--rose);">-=</span> vacrel-&gt;extVacReportIdx.common.wal_records;<br>
+  extVacStats-&gt;common.wal_bytes       <span style="color:var(--rose);">-=</span> vacrel-&gt;extVacReportIdx.common.wal_bytes;<br>
+  extVacStats-&gt;common.total_time      <span style="color:var(--rose);">-=</span> vacrel-&gt;extVacReportIdx.common.total_time;<br>
+  <span style="color:var(--dim);">/* ... and so on for all buffer/WAL/timing fields */</span>
+</div>
+
+<div class="callout">
+  <strong>Why this matters:</strong> Without this subtraction, if you run
+  <code>SELECT total_blks_read FROM pg_stats_vacuum_tables</code>, you'd see
+  index I/O counted twice &mdash; once in each index's row, and again in the table's row.
+  The subtraction ensures clean separation: table stats show <em>only</em> heap work,
+  index stats show <em>only</em> index work.
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 7: FULL END-TO-END FLOW DIAGRAM
+     ══════════════════════════════════════════════════════════════ -->
+<hr class="sep">
+<h2>Complete Data Flow: Vacuum to Extension</h2>
+
+<div class="dia">
+  <div style="font-size:10px; text-transform:uppercase; letter-spacing:2px; color:var(--dim); margin-bottom:8px;">
+    Полный цикл VACUUM для таблицы с 1 индексом (serial path)
+  </div>
+
+  <!-- Phase I -->
+  <div class="dia-row">
+    <div class="dia-box d-heap" style="min-width:650px;">
+      <h4 style="color:var(--sky);">1. Сканируем таблицу</h4>
+      <p><code>lazy_scan_heap()</code><br>
+      Чистим &rarr; замораживаем &rarr; собираем мёртвые TID-ы<br>
+      Счётчики buffer/WAL растут в <code>pgBufferUsage</code> / <code>pgWalUsage</code></p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <!-- Phase II: Bulkdelete -->
+  <div class="dia-row">
+    <div class="dia-box d-idx" style="min-width:650px;">
+      <h4 style="color:var(--purple);">2. Удаляем мёртвые записи из индекса (bulk delete)</h4>
+      <p><code>lazy_vacuum_one_index()</code> &rarr; <code>ambulkdelete</code><br>
+      Index AM удаляет ссылки на мёртвые строки</p>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <span class="arrow-label right" style="color:var(--green);">Hook #1: отчёт INDEX (bulk delete)</span>
+  </div>
+
+  <div class="dia-row">
+    <div class="dia-box d-ext" style="min-width:650px;">
+      <h4 style="color:var(--green);">Расширение получает отчёт по индексу</h4>
+      <p>Сохраняет <code>pages_deleted</code>, <code>tuples_deleted</code>, buffer/WAL.<br>
+      Параллельно <code>accumulate_idxs_vacuum_statistics()</code> копит I/O индексов для вычитания из heap.</p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <!-- Phase III -->
+  <div class="dia-row">
+    <div class="dia-box d-reap" style="min-width:650px;">
+      <h4 style="color:var(--rose);">3. Освобождаем место в таблице</h4>
+      <p><code>lazy_vacuum_heap_rel()</code><br>
+      Второй проход: LP_DEAD &rarr; LP_UNUSED. Ещё немного buffer/WAL.</p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <!-- Cleanup -->
+  <div class="dia-row">
+    <div class="dia-box d-idx" style="min-width:650px;">
+      <h4 style="color:var(--purple);">4. Финальная чистка индекса (cleanup)</h4>
+      <p><code>lazy_cleanup_one_index()</code> &rarr; <code>amvacuumcleanup</code><br>
+      Подбираем полностью пустые страницы, обновляем статистику индекса</p>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <span class="arrow-label right" style="color:var(--green);">Hook #2: отчёт INDEX (cleanup)</span>
+  </div>
+
+  <div class="dia-row">
+    <div class="dia-box d-ext" style="min-width:650px;">
+      <h4 style="color:var(--green);">Расширение получает второй отчёт по тому же индексу</h4>
+      <p>Накапливается в <strong>тот же pgstat entry</strong>.<br>
+      Cleanup может добавить <code>pages_deleted</code> (напр., half-dead страницы в btree).</p>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <!-- Final heap report -->
+  <div class="dia-row">
+    <div class="dia-box d-hook" style="min-width:650px;">
+      <h4 style="color:var(--green);">5. Итоговый отчёт по таблице</h4>
+      <p><code>accumulate_heap_vacuum_statistics()</code>: заполняем heap-счётчики,<br>
+      <strong>вычитаем I/O индексов</strong> чтобы не считать дважды &rarr; <code>pgstat_report_vacuum_ext()</code></p>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <span class="arrow-label right" style="color:var(--green);">Hook #3: отчёт TABLE</span>
+  </div>
+
+  <div class="dia-row">
+    <div class="dia-box d-ext" style="min-width:650px;">
+      <h4 style="color:var(--green);">Расширение получает отчёт по таблице</h4>
+      <p>Тип <code>PGSTAT_EXTVAC_TABLE</code>. Содержит только heap I/O<br>
+      (индексный I/O уже вычтен). <strong>Итого: 3 вызова hook = 2 по индексу + 1 по таблице.</strong></p>
+    </div>
+  </div>
+</div>
+
+<div class="callout" style="margin-top:16px;">
+  <strong>С N индексами:</strong> 2&times;N вызовов hook по индексам (bulk delete + cleanup на каждый) + 1 по таблице.
+  Например, таблица с 3 индексами &rarr; <strong>7 вызовов hook</strong> (6 индексных + 1 табличный).
+  Оба вызова для одного индекса накапливаются в один и тот же pgstat entry.
+</div>
+
+</div>
+</body>
+</html>

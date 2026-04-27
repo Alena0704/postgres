@@ -1,0 +1,9 @@
+t_from,t_to,schemaname,relname,n_indexes,d_pages_scanned,d_table_tuples_deleted,d_idx_passes,d_idx_tuples_deleted,d_idx_pages_deleted,d_idx_blks_dirty,d_idx_wal_bytes,d_failsafe
+2026-04-26 11:36:36+03,2026-04-26 11:36:52+03,public,pgbench_accounts,1,9077,0,0,0,0,0,0,0
+2026-04-26 11:36:52+03,2026-04-26 11:37:08+03,public,pgbench_accounts,1,5924,0,0,0,0,0,0,0
+2026-04-26 11:37:08+03,2026-04-26 11:37:23+03,public,pgbench_accounts,1,5876,0,0,0,0,0,0,0
+2026-04-26 11:37:23+03,2026-04-26 11:37:39+03,public,pgbench_accounts,1,14994,0,0,0,0,0,0,0
+2026-04-26 11:37:39+03,2026-04-26 11:37:51+03,public,pgbench_accounts,1,8756,0,0,0,0,0,0,0
+2026-04-26 11:40:55+03,2026-04-26 11:41:10+03,public,pgbench_accounts,1,94607,0,0,0,0,0,0,0
+2026-04-26 11:41:10+03,2026-04-26 11:41:23+03,public,pgbench_accounts,1,18615,0,0,0,0,0,0,0
+2026-04-26 11:57:35+03,2026-04-26 11:57:50+03,public,pgbench_accounts,1,58205,0,0,0,0,0,0,0

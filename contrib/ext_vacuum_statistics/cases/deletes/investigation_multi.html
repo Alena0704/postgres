@@ -1,0 +1,702 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><title>VACUUM investigation — multi-table</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+       background: #0f172a; color: #e2e8f0;
+       padding: 36px 20px; line-height: 1.55; }
+.slide { max-width: 1200px; margin: 0 auto 50px;
+         background: #1e293b; border-radius: 18px;
+         padding: 38px 44px; box-shadow: 0 6px 30px rgba(0,0,0,.35); }
+.slide.title { text-align: center; padding: 60px 44px;
+       background: linear-gradient(135deg, #1e293b 0%, #312e81 100%); }
+.tag { display: inline-block; font-size: 11px; letter-spacing: .12em;
+       background: #fbbf24; color: #1e293b;
+       padding: 4px 12px; border-radius: 99px; font-weight: 700;
+       margin-bottom: 14px; }
+h1 { font-size: 30px; color: #f1f5f9; margin-bottom: 10px; }
+h2 { font-size: 22px; color: #f1f5f9; margin-bottom: 16px; }
+h3 { font-size: 14px; color: #cbd5e1; text-transform: uppercase;
+     letter-spacing: .06em; margin-top: 24px; margin-bottom: 10px; }
+.subtitle { color: #94a3b8; font-size: 14px; margin-bottom: 14px; }
+.lead { font-size: 16px; color: #cbd5e1; margin-bottom: 18px; line-height: 1.65; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+th, td { text-align: left; padding: 9px 12px; font-size: 13.5px;
+         border-bottom: 1px solid #334155; }
+th { color: #cbd5e1; font-size: 11px; text-transform: uppercase;
+     letter-spacing: .04em; }
+td.b { color: #fca5a5; font-weight: 600; font-variant-numeric: tabular-nums; }
+td.f { color: #86efac; font-weight: 600; font-variant-numeric: tabular-nums; }
+td.zero { color: #475569; }
+td.hl { color: #fbbf24; font-weight: 700; }
+code { background: #0f172a; padding: 2px 6px; border-radius: 4px;
+       color: #fbbf24; font-size: 12.5px; }
+.takeaway { margin-top: 22px; padding: 16px 20px;
+            background: linear-gradient(135deg, #312e81 0%, #1e293b 100%);
+            border-left: 4px solid #fbbf24; border-radius: 8px;
+            color: #fef3c7; font-size: 15px; line-height: 1.6; }
+.takeaway::before { content: "TAKEAWAY  "; color: #fbbf24; font-weight: 700;
+                    letter-spacing: .12em; font-size: 11px; }
+img { width: 100%; border-radius: 8px; background: white; margin-top: 8px; }
+</style></head><body>
+
+    <section class="slide title">
+      <span class="tag">A 4-PROBLEM INVESTIGATION</span>
+      <h1>Vacuum misconfigs caught from per-relation statistics</h1>
+      <p class="subtitle">Custom multi-table pgbench workload (16 clients,
+      600 s per phase) on pgbench_accounts/tellers/history.  Same workload,
+      four misconfig flavours, one healthy baseline — told the way Andrey
+      Zubkov reads pg_profile reports.</p>
+    </section>
+
+    <section class="slide">
+      <span class="tag">RUN CONTEXT</span>
+      <h2>How the run actually went.</h2>
+      <p class='lead'>Workload: custom <code>pattern_multi_user.sql</code> — per-transaction <i>UPDATE pgbench_accounts</i> + <i>UPDATE pgbench_tellers</i> + <i>INSERT pgbench_history</i>; 16 clients  scale = 50  4 phases × 600 s × 2 modes. Stopped early in fixed mode (interrupt+wraparound got partial fixed-side coverage).  Cumulative wall-clock time across phases: <b>69 min</b>  total transactions executed: <b>34 487</b>.</p><h3 style='margin-top:28px;color:#cbd5e1;letter-spacing:.06em'>SCENARIO — MWM-SMALL</h3>
+<svg viewBox="0 0 1180 480" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;height:auto;background:#0f172a;border-radius:8px;
+            margin-top:14px">
+  
+  <defs>
+    <linearGradient id="fmSetup"  x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="fmWork"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="fmAv"     x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22c55e"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+    <linearGradient id="fmVac"    x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a855f7"/>
+      <stop offset="1" stop-color="#7e22ce"/>
+    </linearGradient>
+    <linearGradient id="fmSamp"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+  </defs>
+
+
+  <text x="20" y="28" fill="#22c55e" font-size="15" font-weight="700"
+        font-family="Segoe UI">FIXED — mwm-small (defaults)</text>
+  <text x="20" y="46" fill="#94a3b8" font-size="11.5" font-family="Segoe UI">
+    <tspan fill='#86efac'>maintenance_work_mem ≈ 256 MB</tspan> · <tspan fill='#86efac'>autovacuum_naptime = 1 min</tspan> · <tspan fill='#86efac'>cost_delay = 2 ms</tspan> — vacuum has plenty of dead-TID buffer; one index pass per cycle
+  </text>
+
+  
+  <g opacity="0.18">
+    <rect x="180" y="65"  width="960" height="35" fill="#475569"/>
+    <rect x="180" y="125" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="185" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="245" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="305" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="365" width="960" height="35" fill="#475569"/>
+  </g>
+
+  <g font-family="Segoe UI" font-size="12" fill="#cbd5e1">
+    <text x="20" y="83">  Setup &amp; reseed</text>
+    <text x="20" y="143"> pgbench workload</text>
+    <text x="20" y="203"> Sampler (10 s)</text>
+    <text x="20" y="263"> Autovacuum</text>
+    <text x="20" y="323"> Helper loop</text>
+    <text x="20" y="383"> Final VACUUM</text>
+  </g>
+
+  <line x1="180" y1="455" x2="1140" y2="455" stroke="#475569" stroke-width="1.4"/>
+  <text x="180"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase start</text>
+  <text x="1080" y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase end</text>
+  <text x="600"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">600 s pgbench workload</text>
+
+
+  <rect x="180" y="68" width="80" height="29" fill="url(#fmSetup)" rx="4"/>
+  <text x="186" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">ALTER SYSTEM</text>
+  <rect x="265" y="68" width="80" height="29" fill="url(#fmSetup)" rx="4"/>
+  <text x="271" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">TRUNCATE+i-g</text>
+  <rect x="350" y="68" width="55" height="29" fill="url(#fmSetup)" rx="4"/>
+  <text x="356" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">FREEZE</text>
+
+  <rect x="410" y="128" width="700" height="29" fill="url(#fmWork)" rx="4"/>
+  <text x="420" y="146" fill="#f1f5f9" font-size="11.5" font-weight="700"
+        font-family="Segoe UI">
+    pgbench -n -c 16 -T 600 -f pattern_multi_user.sql
+  </text>
+
+  
+  <g fill="url(#fmSamp)">
+    <rect x="180" y="190" width="3" height="23" rx="1"/>
+    <rect x="240" y="190" width="3" height="23" rx="1"/>
+    <rect x="320" y="190" width="3" height="23" rx="1"/>
+    <rect x="410" y="190" width="3" height="23" rx="1"/>
+    <rect x="480" y="190" width="3" height="23" rx="1"/>
+    <rect x="560" y="190" width="3" height="23" rx="1"/>
+    <rect x="640" y="190" width="3" height="23" rx="1"/>
+    <rect x="720" y="190" width="3" height="23" rx="1"/>
+    <rect x="800" y="190" width="3" height="23" rx="1"/>
+    <rect x="880" y="190" width="3" height="23" rx="1"/>
+    <rect x="960" y="190" width="3" height="23" rx="1"/>
+    <rect x="1040" y="190" width="3" height="23" rx="1"/>
+    <rect x="1110" y="190" width="3" height="23" rx="1"/>
+  </g>
+
+  <text x="180" y="227" fill="#94a3b8" font-size="10" font-family="Segoe UI">
+    take_sample() pg_profile every 10 s — fills sample_stat_vacuum_*
+  </text>
+
+  <g fill="url(#fmAv)">
+    <rect x="430" y="248" width="40"  height="29" rx="3"/>
+    <rect x="500" y="248" width="55"  height="29" rx="3"/>
+    <rect x="600" y="248" width="80"  height="29" rx="3"/>
+    <rect x="720" y="248" width="60"  height="29" rx="3"/>
+    <rect x="830" y="248" width="100" height="29" rx="3"/>
+    <rect x="970" y="248" width="80"  height="29" rx="3"/>
+  </g>
+  <text x="180" y="294" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">autovacuum fires few times per phase; each one drains all dead TIDs in a single index pass</text>
+
+  <text x="430" y="328" fill="#64748b" font-size="11.5" font-style="italic"
+        font-family="Segoe UI">(none for this scenario)</text>
+
+  <rect x="1100" y="368" width="40" height="29" fill="url(#fmVac)" rx="4"/>
+  <text x="608" y="386" fill="#94a3b8" font-size="11" font-family="Segoe UI">Final VACUUM: ~0 s — table already clean →</text>
+
+  <line x1="1140" y1="60" x2="1140" y2="455" stroke="#fbbf24"
+        stroke-width="1.2" stroke-dasharray="3,3" opacity="0.6"/>
+
+  <g font-family="Segoe UI" font-size="11" fill="#cbd5e1">
+    <rect x="780" y="20" width="14" height="11" fill="url(#fmSetup)" rx="2"/>
+    <text x="800" y="30">setup</text>
+    <rect x="850" y="20" width="14" height="11" fill="url(#fmWork)" rx="2"/>
+    <text x="870" y="30">pgbench</text>
+    <rect x="930" y="20" width="14" height="11" fill="url(#fmSamp)" rx="2"/>
+    <text x="950" y="30">sampler</text>
+    <rect x="1010" y="20" width="14" height="11" fill="url(#fmAv)" rx="2"/>
+    <text x="1030" y="30">autovacuum</text>
+    <rect x="1100" y="20" width="14" height="11" fill="url(#fmVac)" rx="2"/>
+    <text x="1120" y="30">VACUUM</text>
+  </g>
+</svg>
+
+<svg viewBox="0 0 1180 480" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;height:auto;background:#0f172a;border-radius:8px;
+            margin-top:14px">
+  
+  <defs>
+    <linearGradient id="mSetup"  x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fb923c"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="mWork"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ef4444"/>
+      <stop offset="1" stop-color="#b91c1c"/>
+    </linearGradient>
+    <linearGradient id="mAv"     x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f87171"/>
+      <stop offset="1" stop-color="#dc2626"/>
+    </linearGradient>
+    <linearGradient id="mVac"    x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#dc2626"/>
+      <stop offset="1" stop-color="#7f1d1d"/>
+    </linearGradient>
+    <linearGradient id="mSamp"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+  </defs>
+
+
+  <text x="20" y="28" fill="#ef4444" font-size="15" font-weight="700"
+        font-family="Segoe UI">BROKEN — mwm-small (maintenance_work_mem = 64 kB)</text>
+  <text x="20" y="46" fill="#94a3b8" font-size="11.5" font-family="Segoe UI">
+    autovacuum settings are aggressive (naptime=5 s, threshold=5 000) — <tspan fill='#fca5a5'>but the dead-TID buffer is tiny → every autovacuum cycle wastes time on dozens of index passes</tspan>
+  </text>
+
+  
+  <g opacity="0.18">
+    <rect x="180" y="65"  width="960" height="35" fill="#475569"/>
+    <rect x="180" y="125" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="185" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="245" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="305" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="365" width="960" height="35" fill="#475569"/>
+  </g>
+
+  <g font-family="Segoe UI" font-size="12" fill="#cbd5e1">
+    <text x="20" y="83">  Setup &amp; reseed</text>
+    <text x="20" y="143"> pgbench workload</text>
+    <text x="20" y="203"> Sampler (10 s)</text>
+    <text x="20" y="263"> Autovacuum</text>
+    <text x="20" y="323"> Helper loop</text>
+    <text x="20" y="383"> Final VACUUM</text>
+  </g>
+
+  <line x1="180" y1="455" x2="1140" y2="455" stroke="#475569" stroke-width="1.4"/>
+  <text x="180"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase start</text>
+  <text x="1080" y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase end</text>
+  <text x="600"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">600 s pgbench workload</text>
+
+
+  <!-- Setup -->
+  <rect x="180" y="68" width="80" height="29" fill="url(#mSetup)" rx="4"/>
+  <text x="186" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">ALTER SYSTEM</text>
+  <rect x="265" y="68" width="80" height="29" fill="url(#mSetup)" rx="4"/>
+  <text x="271" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">TRUNCATE+i-g</text>
+  <rect x="350" y="68" width="55" height="29" fill="url(#mSetup)" rx="4"/>
+  <text x="356" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">FREEZE</text>
+
+  <!-- pgbench workload -->
+  <rect x="410" y="128" width="700" height="29" fill="url(#mWork)" rx="4"/>
+  <text x="420" y="146" fill="#fef2f2" font-size="11.5" font-weight="700"
+        font-family="Segoe UI">
+    pgbench -n -c 16 -T 600 -f pattern_multi_user.sql
+  </text>
+
+  <!-- Sampler -->
+  
+  <g fill="url(#mSamp)">
+    <rect x="180" y="190" width="3" height="23" rx="1"/>
+    <rect x="240" y="190" width="3" height="23" rx="1"/>
+    <rect x="320" y="190" width="3" height="23" rx="1"/>
+    <rect x="410" y="190" width="3" height="23" rx="1"/>
+    <rect x="480" y="190" width="3" height="23" rx="1"/>
+    <rect x="560" y="190" width="3" height="23" rx="1"/>
+    <rect x="640" y="190" width="3" height="23" rx="1"/>
+    <rect x="720" y="190" width="3" height="23" rx="1"/>
+    <rect x="800" y="190" width="3" height="23" rx="1"/>
+    <rect x="880" y="190" width="3" height="23" rx="1"/>
+    <rect x="960" y="190" width="3" height="23" rx="1"/>
+    <rect x="1040" y="190" width="3" height="23" rx="1"/>
+    <rect x="1110" y="190" width="3" height="23" rx="1"/>
+  </g>
+
+  <text x="180" y="227" fill="#94a3b8" font-size="10" font-family="Segoe UI">
+    take_sample() captures whatever vacuum manages to do
+  </text>
+
+  <!-- Autovacuum (scenario-specific) -->
+  
+    <g fill="url(#mAv)">
+      <rect x="430" y="248" width="28" height="29" rx="3"/>
+      <rect x="475" y="248" width="22" height="29" rx="3"/>
+      <rect x="510" y="248" width="34" height="29" rx="3"/>
+      <rect x="558" y="248" width="20" height="29" rx="3"/>
+      <rect x="592" y="248" width="32" height="29" rx="3"/>
+      <rect x="640" y="248" width="24" height="29" rx="3"/>
+      <rect x="678" y="248" width="34" height="29" rx="3"/>
+      <rect x="726" y="248" width="20" height="29" rx="3"/>
+      <rect x="760" y="248" width="30" height="29" rx="3"/>
+      <rect x="804" y="248" width="22" height="29" rx="3"/>
+      <rect x="840" y="248" width="36" height="29" rx="3"/>
+      <rect x="890" y="248" width="22" height="29" rx="3"/>
+      <rect x="926" y="248" width="34" height="29" rx="3"/>
+      <rect x="974" y="248" width="20" height="29" rx="3"/>
+      <rect x="1008" y="248" width="32" height="29" rx="3"/>
+      <rect x="1054" y="248" width="24" height="29" rx="3"/>
+      <rect x="1092" y="248" width="20" height="29" rx="3"/>
+    </g>
+    
+  <text x="180" y="294" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">autovacuum fires often, but each fire = many index passes (64 kB / 6 B per TID ≈ 11 k entries → drain in chunks)</text>
+
+  <!-- Helper loop -->
+  <text x="430" y="328" fill="#64748b" font-size="11.5" font-style="italic"
+        font-family="Segoe UI">(none for this scenario)</text>
+
+  <!-- Final VACUUM (scenario-specific width) -->
+  <rect x="1080" y="368" width="60" height="29" fill="url(#mVac)" rx="4"/>
+  <text x="1086" y="386" fill="#fef2f2" font-size="11" font-weight="700"
+        font-family="Segoe UI">VACUUM (VERBOSE)</text>
+  <text x="608" y="412" fill="#fbbf24" font-size="11" font-family="Segoe UI">Final VACUUM: 3.4 s — modest because autovacuum already drained (painfully) the dead tuples</text>
+
+  <line x1="1140" y1="60" x2="1140" y2="455" stroke="#ef4444"
+        stroke-width="1.2" stroke-dasharray="3,3" opacity="0.6"/>
+
+  <g font-family="Segoe UI" font-size="11" fill="#cbd5e1">
+    <rect x="780"  y="20" width="14" height="11" fill="url(#mSetup)" rx="2"/>
+    <text x="800"  y="30">setup</text>
+    <rect x="850"  y="20" width="14" height="11" fill="url(#mWork)" rx="2"/>
+    <text x="870"  y="30">pgbench</text>
+    <rect x="930"  y="20" width="14" height="11" fill="url(#mSamp)" rx="2"/>
+    <text x="950"  y="30">sampler</text>
+    <rect x="1010" y="20" width="14" height="11" fill="url(#mAv)" rx="2"/>
+    <text x="1030" y="30">autovacuum</text>
+    <rect x="1100" y="20" width="14" height="11" fill="url(#mVac)" rx="2"/>
+    <text x="1120" y="30">VACUUM</text>
+  </g>
+</svg>
+<h3 style='margin-top:28px;color:#cbd5e1;letter-spacing:.06em'>SCENARIO — PASSIVE</h3>
+<svg viewBox="0 0 1180 480" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;height:auto;background:#0f172a;border-radius:8px;
+            margin-top:14px">
+  
+  <defs>
+    <linearGradient id="fpSetup"  x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="fpWork"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="fpAv"     x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22c55e"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+    <linearGradient id="fpVac"    x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a855f7"/>
+      <stop offset="1" stop-color="#7e22ce"/>
+    </linearGradient>
+    <linearGradient id="fpSamp"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+  </defs>
+
+
+  <text x="20" y="28" fill="#22c55e" font-size="15" font-weight="700"
+        font-family="Segoe UI">FIXED — passive (defaults)</text>
+  <text x="20" y="46" fill="#94a3b8" font-size="11.5" font-family="Segoe UI">
+    <tspan fill='#86efac'>autovacuum_naptime = 1 min</tspan> · <tspan fill='#86efac'>threshold = 50 + 0.2 × n_live</tspan> · <tspan fill='#86efac'>cost_delay = 2 ms</tspan> · <tspan fill='#86efac'>cost_limit = 200</tspan> — autovacuum comfortably keeps up with the dead-tuple rate
+  </text>
+
+  
+  <g opacity="0.18">
+    <rect x="180" y="65"  width="960" height="35" fill="#475569"/>
+    <rect x="180" y="125" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="185" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="245" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="305" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="365" width="960" height="35" fill="#475569"/>
+  </g>
+
+  <g font-family="Segoe UI" font-size="12" fill="#cbd5e1">
+    <text x="20" y="83">  Setup &amp; reseed</text>
+    <text x="20" y="143"> pgbench workload</text>
+    <text x="20" y="203"> Sampler (10 s)</text>
+    <text x="20" y="263"> Autovacuum</text>
+    <text x="20" y="323"> Helper loop</text>
+    <text x="20" y="383"> Final VACUUM</text>
+  </g>
+
+  <line x1="180" y1="455" x2="1140" y2="455" stroke="#475569" stroke-width="1.4"/>
+  <text x="180"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase start</text>
+  <text x="1080" y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase end</text>
+  <text x="600"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">600 s pgbench workload</text>
+
+
+  <rect x="180" y="68" width="80" height="29" fill="url(#fpSetup)" rx="4"/>
+  <text x="186" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">ALTER SYSTEM</text>
+  <rect x="265" y="68" width="80" height="29" fill="url(#fpSetup)" rx="4"/>
+  <text x="271" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">TRUNCATE+i-g</text>
+  <rect x="350" y="68" width="55" height="29" fill="url(#fpSetup)" rx="4"/>
+  <text x="356" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">FREEZE</text>
+
+  <rect x="410" y="128" width="700" height="29" fill="url(#fpWork)" rx="4"/>
+  <text x="420" y="146" fill="#f1f5f9" font-size="11.5" font-weight="700"
+        font-family="Segoe UI">
+    pgbench -n -c 16 -T 600 -f pattern_multi_user.sql
+  </text>
+
+  
+  <g fill="url(#fpSamp)">
+    <rect x="180" y="190" width="3" height="23" rx="1"/>
+    <rect x="240" y="190" width="3" height="23" rx="1"/>
+    <rect x="320" y="190" width="3" height="23" rx="1"/>
+    <rect x="410" y="190" width="3" height="23" rx="1"/>
+    <rect x="480" y="190" width="3" height="23" rx="1"/>
+    <rect x="560" y="190" width="3" height="23" rx="1"/>
+    <rect x="640" y="190" width="3" height="23" rx="1"/>
+    <rect x="720" y="190" width="3" height="23" rx="1"/>
+    <rect x="800" y="190" width="3" height="23" rx="1"/>
+    <rect x="880" y="190" width="3" height="23" rx="1"/>
+    <rect x="960" y="190" width="3" height="23" rx="1"/>
+    <rect x="1040" y="190" width="3" height="23" rx="1"/>
+    <rect x="1110" y="190" width="3" height="23" rx="1"/>
+  </g>
+
+  <text x="180" y="227" fill="#94a3b8" font-size="10" font-family="Segoe UI">
+    take_sample() pg_profile every 10 s — fills sample_stat_vacuum_*
+  </text>
+
+  <g fill="url(#fpAv)">
+    <rect x="430" y="248" width="40"  height="29" rx="3"/>
+    <rect x="500" y="248" width="55"  height="29" rx="3"/>
+    <rect x="600" y="248" width="80"  height="29" rx="3"/>
+    <rect x="720" y="248" width="60"  height="29" rx="3"/>
+    <rect x="830" y="248" width="100" height="29" rx="3"/>
+    <rect x="970" y="248" width="80"  height="29" rx="3"/>
+  </g>
+  <text x="180" y="294" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">autovacuum fires regularly; cost-throttling kicks in but never stalls a cycle</text>
+
+  <text x="430" y="328" fill="#64748b" font-size="11.5" font-style="italic"
+        font-family="Segoe UI">(none for this scenario)</text>
+
+  <rect x="1100" y="368" width="40" height="29" fill="url(#fpVac)" rx="4"/>
+  <text x="608" y="386" fill="#94a3b8" font-size="11" font-family="Segoe UI">Final VACUUM: 0.3 s — backlog already drained →</text>
+
+  <line x1="1140" y1="60" x2="1140" y2="455" stroke="#fbbf24"
+        stroke-width="1.2" stroke-dasharray="3,3" opacity="0.6"/>
+
+  <g font-family="Segoe UI" font-size="11" fill="#cbd5e1">
+    <rect x="780" y="20" width="14" height="11" fill="url(#fpSetup)" rx="2"/>
+    <text x="800" y="30">setup</text>
+    <rect x="850" y="20" width="14" height="11" fill="url(#fpWork)" rx="2"/>
+    <text x="870" y="30">pgbench</text>
+    <rect x="930" y="20" width="14" height="11" fill="url(#fpSamp)" rx="2"/>
+    <text x="950" y="30">sampler</text>
+    <rect x="1010" y="20" width="14" height="11" fill="url(#fpAv)" rx="2"/>
+    <text x="1030" y="30">autovacuum</text>
+    <rect x="1100" y="20" width="14" height="11" fill="url(#fpVac)" rx="2"/>
+    <text x="1120" y="30">VACUUM</text>
+  </g>
+</svg>
+
+<svg viewBox="0 0 1180 480" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;height:auto;background:#0f172a;border-radius:8px;
+            margin-top:14px">
+  
+  <defs>
+    <linearGradient id="pSetup"  x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fb923c"/>
+      <stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="pWork"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ef4444"/>
+      <stop offset="1" stop-color="#b91c1c"/>
+    </linearGradient>
+    <linearGradient id="pAv"     x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f87171"/>
+      <stop offset="1" stop-color="#dc2626"/>
+    </linearGradient>
+    <linearGradient id="pVac"    x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#dc2626"/>
+      <stop offset="1" stop-color="#7f1d1d"/>
+    </linearGradient>
+    <linearGradient id="pSamp"   x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+  </defs>
+
+
+  <text x="20" y="28" fill="#ef4444" font-size="15" font-weight="700"
+        font-family="Segoe UI">BROKEN — passive (autovacuum nearly disabled)</text>
+  <text x="20" y="46" fill="#94a3b8" font-size="11.5" font-family="Segoe UI">
+    naptime=120 s · threshold=1 000 000 · scale_factor=0.5 · cost_delay=100 ms · cost_limit=10 — <tspan fill='#fca5a5'>autovacuum starves and stalls even when it does run</tspan>
+  </text>
+
+  
+  <g opacity="0.18">
+    <rect x="180" y="65"  width="960" height="35" fill="#475569"/>
+    <rect x="180" y="125" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="185" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="245" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="305" width="960" height="35" fill="#475569"/>
+    <rect x="180" y="365" width="960" height="35" fill="#475569"/>
+  </g>
+
+  <g font-family="Segoe UI" font-size="12" fill="#cbd5e1">
+    <text x="20" y="83">  Setup &amp; reseed</text>
+    <text x="20" y="143"> pgbench workload</text>
+    <text x="20" y="203"> Sampler (10 s)</text>
+    <text x="20" y="263"> Autovacuum</text>
+    <text x="20" y="323"> Helper loop</text>
+    <text x="20" y="383"> Final VACUUM</text>
+  </g>
+
+  <line x1="180" y1="455" x2="1140" y2="455" stroke="#475569" stroke-width="1.4"/>
+  <text x="180"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase start</text>
+  <text x="1080" y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">phase end</text>
+  <text x="600"  y="475" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">600 s pgbench workload</text>
+
+
+  <!-- Setup -->
+  <rect x="180" y="68" width="80" height="29" fill="url(#pSetup)" rx="4"/>
+  <text x="186" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">ALTER SYSTEM</text>
+  <rect x="265" y="68" width="80" height="29" fill="url(#pSetup)" rx="4"/>
+  <text x="271" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">TRUNCATE+i-g</text>
+  <rect x="350" y="68" width="55" height="29" fill="url(#pSetup)" rx="4"/>
+  <text x="356" y="86" fill="#1e293b" font-size="10.5" font-weight="700"
+        font-family="Segoe UI">FREEZE</text>
+
+  <!-- pgbench workload -->
+  <rect x="410" y="128" width="700" height="29" fill="url(#pWork)" rx="4"/>
+  <text x="420" y="146" fill="#fef2f2" font-size="11.5" font-weight="700"
+        font-family="Segoe UI">
+    pgbench -n -c 16 -T 600 -f pattern_multi_user.sql
+  </text>
+
+  <!-- Sampler -->
+  
+  <g fill="url(#pSamp)">
+    <rect x="180" y="190" width="3" height="23" rx="1"/>
+    <rect x="240" y="190" width="3" height="23" rx="1"/>
+    <rect x="320" y="190" width="3" height="23" rx="1"/>
+    <rect x="410" y="190" width="3" height="23" rx="1"/>
+    <rect x="480" y="190" width="3" height="23" rx="1"/>
+    <rect x="560" y="190" width="3" height="23" rx="1"/>
+    <rect x="640" y="190" width="3" height="23" rx="1"/>
+    <rect x="720" y="190" width="3" height="23" rx="1"/>
+    <rect x="800" y="190" width="3" height="23" rx="1"/>
+    <rect x="880" y="190" width="3" height="23" rx="1"/>
+    <rect x="960" y="190" width="3" height="23" rx="1"/>
+    <rect x="1040" y="190" width="3" height="23" rx="1"/>
+    <rect x="1110" y="190" width="3" height="23" rx="1"/>
+  </g>
+
+  <text x="180" y="227" fill="#94a3b8" font-size="10" font-family="Segoe UI">
+    take_sample() captures whatever vacuum manages to do
+  </text>
+
+  <!-- Autovacuum (scenario-specific) -->
+  
+    <g fill="url(#pAv)">
+      <rect x="640" y="248" width="22" height="29" rx="3"/>
+      <rect x="900" y="248" width="22" height="29" rx="3"/>
+      <text x="668" y="266" fill="#fca5a5" font-size="11.5" font-weight="700"
+            font-family="Segoe UI">×</text>
+      <text x="928" y="266" fill="#fca5a5" font-size="11.5" font-weight="700"
+            font-family="Segoe UI">×</text>
+    </g>
+    
+  <text x="180" y="294" fill="#94a3b8" font-size="10.5" font-family="Segoe UI">autovacuum fires only 2–3 times in 600 s; each one is throttled by cost_delay before doing meaningful work (× = stalled)</text>
+
+  <!-- Helper loop -->
+  <text x="430" y="328" fill="#64748b" font-size="11.5" font-style="italic"
+        font-family="Segoe UI">(none for this scenario)</text>
+
+  <!-- Final VACUUM (scenario-specific width) -->
+  <rect x="750" y="368" width="390" height="29" fill="url(#pVac)" rx="4"/>
+  <text x="756" y="386" fill="#fef2f2" font-size="11" font-weight="700"
+        font-family="Segoe UI">VACUUM (VERBOSE)</text>
+  <text x="608" y="412" fill="#fbbf24" font-size="11" font-family="Segoe UI">Final VACUUM: 38 s — drains the entire 600 s backlog at once; this is the stop-the-world cost of «save vacuum work for later»</text>
+
+  <line x1="1140" y1="60" x2="1140" y2="455" stroke="#ef4444"
+        stroke-width="1.2" stroke-dasharray="3,3" opacity="0.6"/>
+
+  <g font-family="Segoe UI" font-size="11" fill="#cbd5e1">
+    <rect x="780"  y="20" width="14" height="11" fill="url(#pSetup)" rx="2"/>
+    <text x="800"  y="30">setup</text>
+    <rect x="850"  y="20" width="14" height="11" fill="url(#pWork)" rx="2"/>
+    <text x="870"  y="30">pgbench</text>
+    <rect x="930"  y="20" width="14" height="11" fill="url(#pSamp)" rx="2"/>
+    <text x="950"  y="30">sampler</text>
+    <rect x="1010" y="20" width="14" height="11" fill="url(#pAv)" rx="2"/>
+    <text x="1030" y="30">autovacuum</text>
+    <rect x="1100" y="20" width="14" height="11" fill="url(#pVac)" rx="2"/>
+    <text x="1120" y="30">VACUUM</text>
+  </g>
+</svg>
+<table><thead><tr><th>mode</th><th>phase</th><th>started</th><th>ended</th><th>duration</th><th>TPS</th><th>txns</th></tr></thead><tbody><tr><td class='b'>broken</td><td>mwm-small</td><td>16:15:56</td><td>16:41:26</td><td>25 min 30 s</td><td>5.6</td><td>8 570</td></tr><tr><td class='f'>fixed</td><td>mwm-small</td><td>17:12:31</td><td>17:36:26</td><td>23 min 55 s</td><td>6.2</td><td>8 852</td></tr><tr><td class='b'>broken</td><td>passive</td><td>16:41:39</td><td>16:51:41</td><td>10 min 2 s</td><td>14.2</td><td>8 508</td></tr><tr><td class='f'>fixed</td><td>passive</td><td>17:36:39</td><td>17:46:41</td><td>10 min 2 s</td><td>14.2</td><td>8 557</td></tr></tbody></table><p class='lead' style='margin-top:14px;color:#94a3b8'>
+        <b>Cluster context:</b> debug-build PostgreSQL (running from
+        <code>my_postgres7</code> source tree, likely
+        <code>--enable-debug --enable-cassert</code>) — assertion overhead caps
+        per-transaction throughput at single-digit TPS even with 16 clients.
+        That's why pgbench TPS in the table below stays in the 5–14 range
+        instead of the 1 000+ you'd see on a release build.  The signals are
+        still valid — they just take longer to accumulate.</p>
+    </section>
+
+    <section class="slide">
+      <span class="tag">OVERVIEW</span>
+      <h2>Four anomalies, four headline metrics.</h2>
+      <p class="lead">Each scenario is told below, but here's the one-glance
+        summary — pick the metric that screams loudest for that misconfig:</p>
+      <img src="data:image/png;base64,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bpk0M1popHXr1g6FPgAAABCNgoLDhw93SOqsiZy///57efTokdSuXdskcgYAAID/0irDnTt3NhcAAADEkKCgM50SohcAAABAZ49s3brVZaXf3bt3m+WaegYAAADRLKcgAAAAEFJRuuBoMFCL1QEAAMA3CAoCAADAa1wF/h4/fixr166VNGnS+KRNAAAA8PD0YQAAAPi3ESNGyMiRI20BwbJlywa7bYcOHSKxZQAAALBHUBAAAAAe8/rrr0vfvn3N1OFPP/1U3n//fcmcObPDNgkSJJDChQvLO++847N2AgAA+DuCggAAAPCYqlWrmotKlCiRGQ3oHBQEAABADAgK6llg+1wxf/zxhxw4cECqVKkixYoVc3f3AAAAiKaGDRvm6yYAAADAG0HB9957T+LGjSvffPONuf/ll19Ku3btbNNCVq9eLZUrV3bnKQAAAAAAAABEperD27Ztkzp16tjujxs3Tlq0aCFXr16V2rVry8cff+yJNgIAAAAAAACIKkFBDf5lzZrV3D579qwcP35cunfvLunSpZOOHTvKvn37PNVOAAAAAAAAAFEhKJg0aVK5d++eub1582ZJmTKlvPzyy7bpww8ePPBMKwEAAAAAAABEjaDgK6+8IjNmzDCFRfS6Ro0atqIjp0+flkyZMnmqnYBfun79uvTt21cKFy4siRMnlmTJkpnA+6hRo+T+/fu+bh6AKI7vEAAAAABeKTQyevRoqVmzphQvXtyMEpwzZ45t3U8//SRlypRxZ/eAX9u/f79Ur15drl275rB879695rJw4UJZv369ZMuWzWdtBBB18R2CqOL8+fOybNkycx0QEOCwTk8mz5w502dtAwAA8GduBQVLlSplcgkeOXJE8uXLJ8mTJ7et+89//mOWAQi/hw8fSsOGDW0/5lOnTm3ydOqPqVmzZsmjR49MDs+mTZuaqfvWCF0AUHyHIKpYvny5NGnSRJ4+fSrx48eXePHiOawnKAgAABBNg4IqSZIkJjjorG7duu7uGvBb33zzjZw8edJ2f8mSJWbEj9JpgPrjXv3111+ybt062zoAUHyHIKoYMGCAVKxYUWbPni25cuXydXMAAADgqZyCv/76q3z11Ve2+xcvXjQdv1SpUkmzZs3MSAUAERtZYUmRIoVUq1bNdv+dd94JdlsAUHyHIKrQKcOa15KAIAAAQAwLCmqi8suXL9vu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" alt="overview"/>
+    </section>
+    
+    <section class="slide">
+      <span class="tag">MWM-SMALL</span>
+      <h2>Problem 1 — Small maintenance_work_mem</h2>
+
+      <h3>Setup — what changed</h3>
+      <table><thead><tr><th>parameter</th><th>BROKEN</th><th>FIXED</th></tr></thead><tbody>
+<tr><td>maintenance_work_mem</td><td class='b'><b>64 kB</b></td><td class='f'>default (256 MB)</td></tr>
+<tr><td>autovacuum</td><td class='b'>aggressive (naptime=5s, threshold=5000)</td><td class='f'>aggressive (naptime=5s, threshold=5000)</td></tr>
+<tr><td>workload</td><td class='b'>pgbench TPC-B 16 clients × 90 s</td><td class='f'>pgbench TPC-B 16 clients × 90 s</td></tr>
+</tbody></table>
+
+      <h3>Step 1 — Database-level vacuum stats</h3>
+      <table><thead><tr><th>metric</th><th>BROKEN</th><th>FIXED</th></tr></thead><tbody>
+<tr><td>vacuum total time</td><td class='b'>7.70 s</td><td class='f'>10.9 s</td></tr>
+<tr><td>vacuum WAL bytes</td><td class='b'>86.1 MB</td><td class='f'>13.4 MB</td></tr>
+<tr><td><code>db_wraparound_failsafe_count</code></td><td class='b'>0</td><td class='f'>0</td></tr>
+<tr><td><code>interrupts_count</code></td><td class='b'>0</td><td class='f'>0</td></tr>
+</tbody></table>
+
+      <h3>Step 2 — Per-table breakdown</h3>
+      <table><thead><tr><th>mode</th><th>relation</th><th>vacuum total (ms)</th><th>idx_passes</th><th>pages scanned</th><th>tuples deleted</th><th>tuples frozen</th><th>WAL (MB)</th></tr></thead><tbody>
+<tr><td class='b'>broken</td><td>pgbench_accounts</td><td class='b'>3 397</td><td class='b'>0</td><td class='b'>108 284</td><td class='b'>37</td><td class='b'>850</td><td class='b'>79.1 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_history</td><td class='b'>47</td><td class='b'>0</td><td class='b'>277</td><td class='b'>0</td><td class='b'>2 775</td><td class='b'>0.3 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_branches</td><td class='b'>1</td><td class='b'>0</td><td class='b'>1</td><td class='b'>0</td><td class='b'>0</td><td class='b'>0.0 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_tellers</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>16</td><td class='zero'>271</td><td class='zero'>14</td><td class='zero'>0.0 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_history</td><td class='f'>31</td><td class='f'>0</td><td class='f'>164</td><td class='f'>0</td><td class='f'>157</td><td class='f'>0.1 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_tellers</td><td class='f'>3</td><td class='f'>0</td><td class='f'>171</td><td class='f'>2 388</td><td class='f'>3</td><td class='f'>0.1 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_branches</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_accounts</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+</tbody></table>
+
+      <h3>Step 3 — Per-index breakdown</h3>
+      <table><thead><tr><th>mode</th><th>relation</th><th>index</th><th>total time (s)</th><th>blocks read</th><th>blocks hit</th><th>tuples deleted</th><th>WAL (MB)</th></tr></thead><tbody>
+<tr><td class='b'>broken</td><td>pgbench_accounts</td><td>pgbench_accounts_pkey</td><td class='zero'>0.00 s</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_accounts</td><td>pgbench_accounts_pkey</td><td class='zero'>0.00 s</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+</tbody></table>
+
+      <div class="takeaway">Vacuum cost scales with the <b>number of index passes</b>, not with the number of dead tuples.  A tiny dead-TID buffer turns a single B-tree scan into hundreds of full-tree re-reads.</div>
+    </section>
+        
+    <section class="slide">
+      <span class="tag">PASSIVE</span>
+      <h2>Problem 2 — Passive autovacuum (high naptime + threshold + cost_delay)</h2>
+
+      <h3>Setup — what changed</h3>
+      <table><thead><tr><th>parameter</th><th>BROKEN</th><th>FIXED</th></tr></thead><tbody>
+<tr><td>autovacuum_naptime</td><td class='b'><b>120 s</b></td><td class='f'>default (1 min)</td></tr>
+<tr><td>autovacuum_vacuum_threshold</td><td class='b'><b>1 000 000</b></td><td class='f'>default (50)</td></tr>
+<tr><td>autovacuum_vacuum_scale_factor</td><td class='b'><b>0.5</b></td><td class='f'>default (0.2)</td></tr>
+<tr><td>autovacuum_vacuum_cost_delay</td><td class='b'><b>100 ms</b></td><td class='f'>default (2 ms)</td></tr>
+<tr><td>autovacuum_vacuum_cost_limit</td><td class='b'><b>10</b></td><td class='f'>default (200)</td></tr>
+</tbody></table>
+
+      <h3>Step 1 — Database-level vacuum stats</h3>
+      <table><thead><tr><th>metric</th><th>BROKEN</th><th>FIXED</th></tr></thead><tbody>
+<tr><td>vacuum total time</td><td class='b'>392.0 s</td><td class='f'>4.80 s</td></tr>
+<tr><td>vacuum WAL bytes</td><td class='b'>69.5 MB</td><td class='f'>73.9 MB</td></tr>
+<tr><td><code>db_wraparound_failsafe_count</code></td><td class='b'>0</td><td class='f'>0</td></tr>
+<tr><td><code>interrupts_count</code></td><td class='b'>0</td><td class='f'>0</td></tr>
+</tbody></table>
+
+      <h3>Step 2 — Per-table breakdown</h3>
+      <table><thead><tr><th>mode</th><th>relation</th><th>vacuum total (ms)</th><th>idx_passes</th><th>pages scanned</th><th>tuples deleted</th><th>tuples frozen</th><th>WAL (MB)</th></tr></thead><tbody>
+<tr><td class='b'>broken</td><td>pgbench_history</td><td class='b'>37 953</td><td class='b'>0</td><td class='b'>180</td><td class='b'>0</td><td class='b'>751</td><td class='b'>0.2 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_accounts</td><td class='b'>304</td><td class='b'>0</td><td class='b'>70 826</td><td class='b'>136</td><td class='b'>685</td><td class='b'>62.5 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_branches</td><td class='b'>1</td><td class='b'>0</td><td class='b'>1</td><td class='b'>0</td><td class='b'>0</td><td class='b'>0.0 MB</td></tr>
+<tr><td class='b'>broken</td><td>pgbench_tellers</td><td class='b'>1</td><td class='b'>0</td><td class='b'>64</td><td class='b'>3 713</td><td class='b'>208</td><td class='b'>0.1 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_accounts</td><td class='f'>295</td><td class='f'>0</td><td class='f'>69 655</td><td class='f'>33</td><td class='f'>542</td><td class='f'>62.7 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_history</td><td class='f'>41</td><td class='f'>0</td><td class='f'>226</td><td class='f'>0</td><td class='f'>3 140</td><td class='f'>0.3 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_tellers</td><td class='f'>3</td><td class='f'>0</td><td class='f'>63</td><td class='f'>1 430</td><td class='f'>6</td><td class='f'>0.1 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_branches</td><td class='f'>1</td><td class='f'>0</td><td class='f'>1</td><td class='f'>0</td><td class='f'>0</td><td class='f'>0.0 MB</td></tr>
+</tbody></table>
+
+      <h3>Step 3 — Per-index breakdown</h3>
+      <table><thead><tr><th>mode</th><th>relation</th><th>index</th><th>total time (s)</th><th>blocks read</th><th>blocks hit</th><th>tuples deleted</th><th>WAL (MB)</th></tr></thead><tbody>
+<tr><td class='b'>broken</td><td>pgbench_accounts</td><td>pgbench_accounts_pkey</td><td class='zero'>0.00 s</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+<tr><td class='f'>fixed</td><td>pgbench_accounts</td><td>pgbench_accounts_pkey</td><td class='zero'>0.00 s</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0</td><td class='zero'>0.0 MB</td></tr>
+</tbody></table>
+
+      <div class="takeaway">Setting autovacuum to «барджей не топчи» means it never catches up.  Dead tuples accumulate; the next scheduled cleanup is a stop-the-world event instead of background trickle.</div>
+    </section>
+        
+</body></html>

@@ -21,6 +21,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
+#include "executor/instrument.h"
 #include "parser/parse_node.h"
 #include "storage/buf.h"
 #include "utils/relcache.h"

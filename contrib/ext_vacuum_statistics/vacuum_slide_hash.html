@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>pgstat Shared Hash Table</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; padding: 40px;
+  }
+
+  h1 { font-size: 28px; text-align: center; margin-bottom: 6px; }
+  .subtitle { font-size: 16px; color: #94a3b8; text-align: center; margin-bottom: 48px; }
+
+  /* ── hash table visual ── */
+  .hash-table {
+    width: 100%; max-width: 1100px;
+    border: 2px solid #4ade80; border-radius: 16px; overflow: hidden;
+    margin-bottom: 48px;
+  }
+
+  /* header row */
+  .ht-header {
+    display: flex; background: rgba(74,222,128,.12);
+    border-bottom: 2px solid #4ade80;
+    font-size: 14px; font-weight: 700; color: #4ade80;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .ht-header > div { padding: 12px 16px; }
+
+  /* data row */
+  .ht-row {
+    display: flex; border-bottom: 1px solid rgba(255,255,255,.06);
+    font-size: 16px; transition: background .15s;
+  }
+  .ht-row:last-child { border-bottom: none; }
+  .ht-row:hover { background: rgba(255,255,255,.03); }
+
+  .ht-row > div {
+    padding: 12px 16px; display: flex; align-items: center;
+  }
+
+  /* columns */
+  .col-bucket { flex: 0 0 60px; color: #64748b; font-size: 14px; justify-content: center; }
+  .col-kind   { flex: 0 0 180px; }
+  .col-db     { flex: 0 0 130px; }
+  .col-obj    { flex: 0 0 130px; }
+  .col-data   { flex: 1; }
+
+  /* kind badges */
+  .kind-badge {
+    display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 10px;
+    border-radius: 16px; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .kb-rel  { background: rgba(56,189,248,.15); color: #38bdf8; }
+  .kb-func { background: rgba(168,85,247,.15); color: #a855f7; }
+  .kb-ext  { background: rgba(245,158,11,.15); color: #f59e0b; }
+  .kb-db   { background: rgba(251,113,133,.15); color: #fb7185; }
+
+  code {
+    font-size: 14px; background: rgba(0,0,0,.3); padding: 1px 5px;
+    border-radius: 3px; color: #7dd3fc; font-family: 'JetBrains Mono', monospace;
+  }
+
+  .val { color: #94a3b8; font-size: 14px; }
+
+  /* highlight row */
+  .ht-row.highlight {
+    background: rgba(245,158,11,.06);
+    border-left: 4px solid #f59e0b;
+  }
+
+  /* arrow pointer */
+  .pointer-section {
+    display: flex; align-items: center; gap: 16px;
+    max-width: 1100px; width: 100%; margin-bottom: 48px;
+  }
+  .pointer-box {
+    border-radius: 14px; padding: 16px 20px; font-size: 16px; line-height: 1.5;
+    flex: 1;
+  }
+  .pb-write {
+    background: rgba(74,222,128,.06); border: 2px solid #4ade80;
+  }
+  .pb-read {
+    background: rgba(56,189,248,.06); border: 2px solid #38bdf8;
+  }
+  .pointer-box strong { font-weight: 700; }
+  .pointer-box .sub { font-size: 14px; color: #94a3b8; margin-top: 4px; }
+
+  .arrow-h {
+    display: flex; align-items: center; justify-content: center;
+    width: 48px; flex-shrink: 0;
+  }
+  .arrow-h svg { display: block; }
+
+  /* footnote */
+  .footnote {
+    margin-top: 16px; font-size: 16px; color: #94a3b8; text-align: center;
+    max-width: 1100px; width: 100%;
+  }
+</style>
+</head>
+<body>
+
+<h1>pgstat Shared Hash Table (dshash)</h1>
+<p class="subtitle">All cumulative statistics &mdash; built-in and custom &mdash; live in one dynamic hash table in shared memory</p>
+
+<!-- ══════ Hash Table Visualization ══════ -->
+<div class="hash-table">
+
+  <div class="ht-header">
+    <div class="col-bucket">#</div>
+    <div class="col-kind">Kind</div>
+    <div class="col-db">Database</div>
+    <div class="col-obj">Object</div>
+    <div class="col-data">Counters (cumulative)</div>
+  </div>
+
+  <div class="ht-row">
+    <div class="col-bucket">0</div>
+    <div class="col-kind"><span class="kind-badge kb-rel">RELATION</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj"><code>orders</code></div>
+    <div class="col-data"><span class="val">seq_scan: 42 &nbsp; tup_ins: 15203 &nbsp; tup_upd: 3017 &nbsp; live: 11295</span></div>
+  </div>
+
+  <div class="ht-row">
+    <div class="col-bucket">1</div>
+    <div class="col-kind"><span class="kind-badge kb-rel">RELATION</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj"><code>users</code></div>
+    <div class="col-data"><span class="val">seq_scan: 7 &nbsp; tup_ins: 892 &nbsp; tup_del: 31 &nbsp; live: 861</span></div>
+  </div>
+
+  <div class="ht-row">
+    <div class="col-bucket">2</div>
+    <div class="col-kind"><span class="kind-badge kb-func">FUNCTION</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj"><code>calc_total</code></div>
+    <div class="col-data"><span class="val">calls: 5840 &nbsp; total_time: 12.4s &nbsp; self_time: 8.1s</span></div>
+  </div>
+
+  <div class="ht-row">
+    <div class="col-bucket">3</div>
+    <div class="col-kind"><span class="kind-badge kb-db">DATABASE</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj">&mdash;</div>
+    <div class="col-data"><span class="val">xact_commit: 48201 &nbsp; blks_read: 9104 &nbsp; blks_hit: 283910</span></div>
+  </div>
+
+  <div class="ht-row highlight">
+    <div class="col-bucket">4</div>
+    <div class="col-kind"><span class="kind-badge kb-ext">EXT_VAC_REL</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj"><code>orders</code></div>
+    <div class="col-data"><span class="val">blks_read: 340 &nbsp; pages_scanned: 128 &nbsp; tuples_frozen: 9201</span></div>
+  </div>
+
+  <div class="ht-row highlight">
+    <div class="col-bucket">5</div>
+    <div class="col-kind"><span class="kind-badge kb-ext">EXT_VAC_REL</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj"><code>orders_pkey</code></div>
+    <div class="col-data"><span class="val">blks_read: 52 &nbsp; pages_deleted: 3 &nbsp; tuples_deleted: 891</span></div>
+  </div>
+
+  <div class="ht-row highlight">
+    <div class="col-bucket">6</div>
+    <div class="col-kind"><span class="kind-badge kb-ext">EXT_VAC_DB</span></div>
+    <div class="col-db"><code>mydb</code></div>
+    <div class="col-obj">&mdash;</div>
+    <div class="col-data"><span class="val">blks_read: 392 &nbsp; wal_bytes: 81920 &nbsp; total_time: 1.2s</span></div>
+  </div>
+
+  <div class="ht-row">
+    <div class="col-bucket">...</div>
+    <div class="col-kind" style="color:#64748b;">...</div>
+    <div class="col-db" style="color:#64748b;">...</div>
+    <div class="col-obj" style="color:#64748b;">...</div>
+    <div class="col-data" style="color:#64748b;">...</div>
+  </div>
+
+</div>
+
+<!-- ══════ Write / Read ══════ -->
+<div class="pointer-section">
+
+  <div class="pointer-box pb-write">
+    <strong style="color:#4ade80;">Write</strong>
+    <div class="sub">Find or create entry by key (kind, db, obj).<br>Lock entry, add deltas, unlock.</div>
+  </div>
+
+  <div class="arrow-h">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <div class="pointer-box pb-read">
+    <strong style="color:#38bdf8;">Read</strong>
+    <div class="sub">Lookup by same key.<br>Return counters to SQL view.</div>
+  </div>
+
+</div>
+
+<div class="footnote">
+  Highlighted rows are <strong style="color:#f59e0b;">ext_vacuum_statistics</strong> custom entries &mdash;
+  they live in the same hash table alongside built-in PostgreSQL statistics.
+</div>
+
+</body>
+</html>

@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ext_vacuum_statistics — Architecture</title>
+<style>
+  :root {
+    --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --dim: #64748b;
+    --blue: #3b82f6; --purple: #a855f7; --cyan: #22d3ee;
+    --green: #4ade80; --amber: #f59e0b; --pink: #f472b6;
+    --orange: #fb923c; --red: #ef4444; --teal: #2dd4bf;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+
+  /* ── nav tabs ── */
+  .tabs {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; justify-content: center; gap: 0;
+    background: #020617; border-bottom: 1px solid var(--bg3);
+    padding: 0; backdrop-filter: blur(12px);
+  }
+  .tab {
+    padding: 16px 32px; cursor: pointer; font-size: 14px; font-weight: 600;
+    color: var(--muted); border-bottom: 3px solid transparent;
+    transition: all .2s; user-select: none; text-align: center;
+    line-height: 1.3;
+  }
+  .tab:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .tab.active { color: #fff; border-bottom-color: var(--cyan); }
+  .tab small { display: block; font-weight: 400; font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+  /* ── layers ── */
+  .layer { display: none; padding: 40px 32px 80px; max-width: 1200px; margin: 0 auto; }
+  .layer.active { display: block; }
+
+  /* ── typography ── */
+  h1 { font-size: 32px; margin-bottom: 8px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; color: #fff; }
+  h2:first-child { margin-top: 0; }
+  h3 { font-size: 16px; margin-bottom: 8px; }
+  p, li { font-size: 14px; line-height: 1.7; color: var(--text); }
+  .lead { font-size: 16px; color: var(--muted); margin-bottom: 32px; line-height: 1.6; }
+
+  /* ── cards ── */
+  .card {
+    background: var(--bg2); border: 1px solid var(--bg3); border-radius: 16px;
+    padding: 28px; margin-bottom: 20px;
+  }
+  .card-accent { border-left: 4px solid; }
+  .card h3 { display: flex; align-items: center; gap: 10px; }
+  .card ul { padding-left: 20px; margin-top: 8px; }
+  .card li { margin-bottom: 4px; }
+  code {
+    font-size: 12px; background: rgba(0,0,0,.35); padding: 2px 7px;
+    border-radius: 4px; color: #7dd3fc; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; padding: 2px 10px;
+    border-radius: 20px; font-weight: 600; margin-right: 6px;
+  }
+  .tag-blue   { background: rgba(59,130,246,.2); color: var(--blue); }
+  .tag-green  { background: rgba(74,222,128,.2); color: var(--green); }
+  .tag-amber  { background: rgba(245,158,11,.2); color: var(--amber); }
+  .tag-purple { background: rgba(168,85,247,.2); color: var(--purple); }
+  .tag-cyan   { background: rgba(34,211,238,.2); color: var(--cyan); }
+  .tag-pink   { background: rgba(244,114,182,.2); color: var(--pink); }
+
+  /* ── grid ── */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  /* ── diagram boxes ── */
+  .dia { text-align: center; margin: 32px auto; max-width: 1000px; }
+  .dia-row { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+  .dia-box {
+    border-radius: 12px; padding: 14px 18px; text-align: center;
+    min-width: 160px; font-size: 13px; line-height: 1.5;
+  }
+  .dia-box h4 { font-size: 13px; margin-bottom: 4px; }
+  .dia-box p { font-size: 11px; color: var(--muted); }
+  .dia-box code { font-size: 10px; }
+  .dia-box ul { font-size: 11px; text-align: left; padding-left: 14px; color: var(--muted); }
+
+  /* dia colors */
+  .d-pg     { background: #1e3a5f; border: 2px solid var(--blue); }
+  .d-hook   { background: #3b1f5e; border: 2px solid var(--purple); }
+  .d-filter { background: #1a3344; border: 2px solid var(--cyan); }
+  .d-store  { background: #1c3322; border: 2px solid var(--green); }
+  .d-out    { background: #3a2710; border: 2px solid var(--amber); }
+  .d-user   { background: #3b1530; border: 2px solid var(--pink); }
+  .d-guc    { background: #2d2215; border: 2px dashed var(--orange); }
+  .d-file   { background: #1a2733; border: 2px dotted var(--dim); }
+  .d-lock   { background: #2a1a1a; border: 2px solid var(--red); }
+  .d-hash   { background: #1a2a2a; border: 2px solid var(--teal); }
+
+  /* arrows */
+  .arrow {
+    display: flex; justify-content: center; align-items: center;
+    height: 40px; position: relative;
+  }
+  .arrow::before {
+    content: ''; width: 2px; height: 20px; background: var(--dim);
+  }
+  .arrow::after {
+    content: ''; position: absolute; bottom: 4px;
+    border-left: 7px solid transparent; border-right: 7px solid transparent;
+    border-top: 9px solid var(--dim);
+  }
+  .arrow-label {
+    position: absolute; font-size: 11px; color: var(--muted);
+    right: calc(50% - 180px); white-space: nowrap;
+  }
+
+  /* ── person SVG ── */
+  .person-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .person-label { font-size: 13px; font-weight: 600; }
+
+  /* ── table ── */
+  .cfg-table {
+    width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px;
+  }
+  .cfg-table th {
+    text-align: left; padding: 10px 14px; background: rgba(0,0,0,.3);
+    color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase;
+    letter-spacing: 1px; border-bottom: 1px solid var(--bg3);
+  }
+  .cfg-table td {
+    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.05);
+    vertical-align: top;
+  }
+  .cfg-table tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* ── memory map ── */
+  .mem-block {
+    display: flex; align-items: stretch; border-radius: 8px; overflow: hidden;
+    margin: 8px 0; font-size: 12px;
+  }
+  .mem-block .field {
+    padding: 10px 14px; border-right: 1px solid rgba(0,0,0,.3);
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .mem-block .field:last-child { border-right: none; }
+  .mem-block .field-name { font-weight: 600; font-size: 11px; }
+  .mem-block .field-size { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* ── callout ── */
+  .callout {
+    background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.25);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0; font-size: 13px;
+  }
+  .callout strong { color: var(--cyan); }
+
+  /* ── separator ── */
+  .sep { border: none; border-top: 1px solid var(--bg3); margin: 40px 0; }
+
+  /* flow-wide */
+  .flow-wide { max-width: 100%; }
+  .flow-wide .dia-box { flex: 1; min-width: 200px; max-width: 320px; }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════ NAVIGATION ════════════════════ -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab(0)">
+    Layer 1: Overview
+    <small>for everyone</small>
+  </div>
+  <div class="tab" onclick="switchTab(1)">
+    Layer 2: DBA Guide
+    <small>configuration &amp; usage</small>
+  </div>
+  <div class="tab" onclick="switchTab(2)">
+    Layer 3: Internals
+    <small>for developers</small>
+  </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════════════╗
+     ║  LAYER 1 — OVERVIEW (for everyone)                             ║
+     ╚══════════════════════════════════════════════════════════════════╝ -->
+<div class="layer active" id="layer0">
+
+  <h1>How ext_vacuum_statistics Works</h1>
+  <p class="lead">
+    This extension gives you detailed metrics about what PostgreSQL's VACUUM process actually does:
+    how much I/O it generates, how many pages it scans, how many tuples it freezes,
+    and how long it takes. All of this happens transparently &mdash;
+    VACUUM works exactly as before, but now you can see inside it.
+  </p>
+
+  <!-- ── Module 1: What PostgreSQL Core collects ── -->
+  <h2>Module 1: What PostgreSQL Already Collects</h2>
+  <div class="card card-accent" style="border-left-color: var(--blue);">
+    <h3><span class="tag tag-blue">PostgreSQL Core</span> Vacuum Counters</h3>
+    <p style="margin-top:8px;">
+      Every time PostgreSQL runs VACUUM (manually or via autovacuum), the core engine
+      already computes a rich set of internal counters. Think of it like an odometer
+      in a car &mdash; the engine tracks everything, but normally these numbers
+      are not shown to you.
+    </p>
+    <div class="grid2" style="margin-top:16px;">
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Buffer I/O</h3>
+        <ul>
+          <li>Pages read from disk</li>
+          <li>Pages found in shared buffers (cache hits)</li>
+          <li>Pages dirtied &amp; written back</li>
+          <li>Time spent on reads &amp; writes</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">WAL (Write-Ahead Log)</h3>
+        <ul>
+          <li>Number of WAL records generated</li>
+          <li>Full-page images (FPI) written</li>
+          <li>Total WAL bytes produced</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Heap Work (tables)</h3>
+        <ul>
+          <li>Pages scanned &amp; pages removed</li>
+          <li>Dead tuples deleted</li>
+          <li>Tuples frozen (to prevent wraparound)</li>
+          <li>Visibility map pages marked frozen/visible</li>
+          <li>Index vacuum passes count</li>
+        </ul>
+      </div>
+      <div>
+        <h3 style="color:var(--blue); font-size:14px;">Timing &amp; Safety</h3>
+        <ul>
+          <li>Total vacuum time</li>
+          <li>Cost-based delay time</li>
+          <li>Wraparound failsafe triggers</li>
+          <li>Interrupt events</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:16px;">
+      <strong>The problem:</strong> PostgreSQL collects all these numbers, but historically there
+      was no way for external code to see them after the vacuum finishes. The numbers were computed
+      internally and then discarded (or only partially logged to server log).
+    </div>
+  </div>
+
+  <!-- ── Module 2: What the extension adds ── -->
+  <h2>Module 2: What ext_vacuum_statistics Adds</h2>
+  <div class="card card-accent" style="border-left-color: var(--purple);">
+    <h3><span class="tag tag-purple">Extension</span> The Hook Mechanism</h3>
+    <p style="margin-top:8px;">
+      PostgreSQL has a system of <strong>hooks</strong> &mdash; special "connectors" where
+      extensions can plug in their own code. Think of it like a tee-junction in a pipe:
+      the water (data) flows normally, but you install a side-branch to capture a sample.
+    </p>
+    <p style="margin-top:8px;">
+      Our extension uses the <code>set_report_vacuum_hook</code>. At the exact moment
+      when VACUUM finishes processing a table or index, PostgreSQL calls our function
+      and passes all the counters described above. We don't change VACUUM's behavior
+      at all &mdash; we just intercept the report.
+    </p>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--green);">
+    <h3><span class="tag tag-green">Extension</span> Statistics Accumulation</h3>
+    <p style="margin-top:8px;">
+      Once the extension receives the counters from VACUUM, it stores them in
+      <strong>shared memory</strong> &mdash; a region of RAM that all PostgreSQL
+      processes can access. The statistics are <strong>cumulative</strong>:
+      each time VACUUM runs on the same table, the new numbers are added
+      to the existing totals. This way you see the full picture over time,
+      not just the last run.
+    </p>
+    <p style="margin-top:8px;">
+      Statistics are saved at three levels:
+    </p>
+    <ul style="margin-top:4px;">
+      <li><strong>Per table</strong> &mdash; detailed breakdown for each individual table</li>
+      <li><strong>Per index</strong> &mdash; separate counters for each index vacuumed</li>
+      <li><strong>Per database</strong> &mdash; aggregated totals across all tables in a database</li>
+    </ul>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--amber);">
+    <h3><span class="tag tag-amber">Extension</span> Querying the Statistics</h3>
+    <p style="margin-top:8px;">
+      The extension exposes three SQL <strong>views</strong> &mdash; just like regular
+      PostgreSQL system views. You query them with <code>SELECT</code>,
+      join them with other tables, filter, sort &mdash; nothing special needed:
+    </p>
+    <ul style="margin-top:8px;">
+      <li><code>ext_vacuum_statistics.pg_stats_vacuum_tables</code> &mdash; one row per table</li>
+      <li><code>ext_vacuum_statistics.pg_stats_vacuum_indexes</code> &mdash; one row per index</li>
+      <li><code>ext_vacuum_statistics.pg_stats_vacuum_database</code> &mdash; one row per database</li>
+    </ul>
+  </div>
+
+  <!-- ── Diagram for users ── -->
+  <hr class="sep">
+  <h2>How It All Fits Together</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-pg" style="min-width:400px;">
+        <h4 style="color:var(--blue);">PostgreSQL VACUUM / AUTOVACUUM</h4>
+        <p>Runs on each table/index. Computes internal counters:<br>
+        buffers, WAL, pages scanned, tuples deleted, timing...</p>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label">Hook: intercepts the report</span>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:400px;">
+        <h4 style="color:var(--purple);">ext_vacuum_statistics (Extension)</h4>
+        <p>Receives all counters. Decides which to track based on settings.<br>
+        Accumulates numbers into shared memory.</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-row flow-wide">
+      <div class="dia-box d-store">
+        <h4 style="color:var(--green);">Shared Memory</h4>
+        <p>Cumulative counters<br>per table, index, database.<br>Survives between vacuum runs.<br>Auto-saved to disk.</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-row flow-wide">
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Tables View</h4>
+        <p>Per-table stats</p>
+      </div>
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Indexes View</h4>
+        <p>Per-index stats</p>
+      </div>
+      <div class="dia-box d-out">
+        <h4 style="color:var(--amber);">Database View</h4>
+        <p>Aggregated stats</p>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:300px;">
+        <div class="person-wrap">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA / User</span>
+          <p style="font-size:12px;color:var(--muted);">SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════════════╗
+     ║  LAYER 2 — DBA GUIDE (configuration & usage)                   ║
+     ╚══════════════════════════════════════════════════════════════════╝ -->
+<div class="layer" id="layer1">
+
+  <h1>DBA Guide: Configuration &amp; Usage</h1>
+  <p class="lead">
+    How to install, configure, and use the extension day-to-day.
+    Everything here is done through SQL and postgresql.conf &mdash; no C code needed.
+  </p>
+
+  <!-- ── Installation ── -->
+  <h2>Installation</h2>
+  <div class="card">
+    <p>1. Add to <code>shared_preload_libraries</code> in <code>postgresql.conf</code>:</p>
+    <p style="margin:8px 0;"><code>shared_preload_libraries = 'ext_vacuum_statistics'</code></p>
+    <p>2. Restart PostgreSQL (required for shared memory allocation).</p>
+    <p>3. Create the extension in each database:</p>
+    <p style="margin:8px 0;"><code>CREATE EXTENSION ext_vacuum_statistics;</code></p>
+  </div>
+
+  <!-- ── Settings ── -->
+  <h2>Configuration Parameters (GUC)</h2>
+  <p>All settings live under the <code>vacuum_statistics.*</code> namespace and can be changed with <code>ALTER SYSTEM</code> or in <code>postgresql.conf</code>.</p>
+
+  <div class="card" style="overflow-x:auto;">
+    <table class="cfg-table">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Default</th>
+          <th>What it does</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>vacuum_statistics.enabled</code></td>
+          <td><code>on</code></td>
+          <td>Master switch. When <code>off</code>, no statistics are collected at all.</td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.object_types</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            What to track: <code>'all'</code> (tables + indexes + database aggregates),
+            <code>'relations'</code> (only tables &amp; indexes),
+            <code>'databases'</code> (only database-level aggregates).
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_relations</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            Filter by relation type: <code>'all'</code>, <code>'user'</code> (only user tables),
+            <code>'system'</code> (only catalog/system tables).
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.collect</code></td>
+          <td><code>'all'</code></td>
+          <td>
+            Which counter categories to accumulate. Comma-separated list:<br>
+            <span class="tag tag-blue">buffers</span>
+            <span class="tag tag-green">wal</span>
+            <span class="tag tag-amber">general</span>
+            <span class="tag tag-purple">timing</span><br>
+            Example: <code>'buffers,timing'</code> &mdash; skip WAL and tuple counters.
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_relations_from_list</code></td>
+          <td><code>off</code></td>
+          <td>
+            Whitelist mode for relations. When <code>on</code>, only tables/indexes
+            explicitly added via <code>add_track_relation()</code> are tracked.
+          </td>
+        </tr>
+        <tr>
+          <td><code>vacuum_statistics.track_databases_from_list</code></td>
+          <td><code>off</code></td>
+          <td>
+            Whitelist mode for databases. When <code>on</code>, only databases
+            added via <code>add_track_database()</code> are tracked.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── Whitelist ── -->
+  <h2>Whitelist Management</h2>
+  <div class="grid2">
+    <div class="card card-accent" style="border-left-color: var(--cyan);">
+      <h3 style="color:var(--cyan);">Tracking Specific Databases</h3>
+      <p style="margin-top:8px;">
+        1. Enable: <code>SET vacuum_statistics.track_databases_from_list = on;</code><br>
+        2. Add: <code>SELECT ext_vacuum_statistics.add_track_database(oid) FROM pg_database WHERE datname = 'mydb';</code><br>
+        3. Remove: <code>SELECT ext_vacuum_statistics.remove_track_database(...);</code>
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--cyan);">
+      <h3 style="color:var(--cyan);">Tracking Specific Tables</h3>
+      <p style="margin-top:8px;">
+        1. Enable: <code>SET vacuum_statistics.track_relations_from_list = on;</code><br>
+        2. Add: <code>SELECT ext_vacuum_statistics.add_track_relation(current_database()::oid, 'mytable'::regclass::oid);</code><br>
+        3. View list: <code>SELECT * FROM ext_vacuum_statistics.track_list();</code>
+      </p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Track list persistence:</strong> The whitelist is saved to a file on disk
+    (<code>pg_stat/ext_vacuum_statistics_track.oid</code>), so it survives PostgreSQL
+    restarts. When a tracked table or database is dropped, the extension automatically
+    cleans up the list entry.
+  </div>
+
+  <!-- ── Querying ── -->
+  <h2>Querying Statistics</h2>
+  <div class="grid3">
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Tables</h3>
+      <p style="margin-top:6px; font-size:12px;">
+        <code>SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;</code>
+      </p>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">
+        Pages scanned/removed, tuples deleted/frozen, VM pages, buffer I/O, WAL, timing, index vacuum count, missed dead tuples.
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Indexes</h3>
+      <p style="margin-top:6px; font-size:12px;">
+        <code>SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_indexes;</code>
+      </p>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">
+        Buffer I/O, WAL, timing, tuples deleted, pages deleted.
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--amber);">
+      <h3 style="color:var(--amber); font-size:14px;">Databases</h3>
+      <p style="margin-top:6px; font-size:12px;">
+        <code>SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_database;</code>
+      </p>
+      <p style="margin-top:8px; font-size:12px; color:var(--muted);">
+        Aggregated: buffer I/O, WAL, timing, failsafe &amp; interrupt counts.
+      </p>
+    </div>
+  </div>
+
+  <!-- ── Admin operations ── -->
+  <h2>Administrative Operations</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3 style="color:var(--pink); font-size:14px;">Reset Statistics</h3>
+      <ul>
+        <li><code>SELECT ext_vacuum_statistics.vacuum_statistics_reset();</code> &mdash; reset everything</li>
+        <li><code>SELECT ext_vacuum_statistics.extvac_reset_entry(dboid, relid, type);</code> &mdash; reset one relation</li>
+        <li><code>SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid);</code> &mdash; reset one database</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--teal); font-size:14px;">Memory Usage</h3>
+      <p style="margin-top:8px;">
+        <code>SELECT ext_vacuum_statistics.shared_memory_size();</code><br>
+        Returns total shared memory used in bytes (~232 bytes per tracked object).
+      </p>
+    </div>
+  </div>
+
+  <!-- ── Persistence ── -->
+  <h2>Statistics Persistence Across Restarts</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:180px;">
+        <div class="person-wrap">
+          <svg width="44" height="44" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label">VACUUM runs, stats accumulate</span>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:350px;">
+        <h4 style="color:var(--green);">Shared Memory</h4>
+        <p>Live cumulative counters.<br>Fast access for all backends.</p>
+      </div>
+    </div>
+
+    <div class="dia-row" style="margin-top: 8px; gap:60px;">
+      <div style="display:flex; flex-direction:column; align-items:center;">
+        <div class="arrow" style="height:30px;"></div>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">pgstat auto-flush</div>
+      </div>
+      <div style="display:flex; flex-direction:column; align-items:center;">
+        <div class="arrow" style="height:30px;"></div>
+        <div style="font-size:11px; color:var(--muted); margin-bottom:4px;">explicit save</div>
+      </div>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-file" style="min-width:200px;">
+        <h4 style="color:var(--dim);">pg_stat/ directory</h4>
+        <p>Stats auto-flushed by pgstat framework.<br>Survives clean restart/shutdown.</p>
+      </div>
+      <div class="dia-box d-file" style="min-width:200px;">
+        <h4 style="color:var(--dim);">Track list file</h4>
+        <p>ext_vacuum_statistics_track.oid<br>Whitelist of tracked OIDs.</p>
+      </div>
+    </div>
+
+    <div class="arrow">
+      <span class="arrow-label">On restart: loaded back automatically</span>
+    </div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:350px;">
+        <h4 style="color:var(--green);">Shared Memory (restored)</h4>
+        <p>Stats are back. DBA sees continuous history.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Important:</strong> Statistics survive <em>clean</em> restarts (pg_ctl stop / restart).
+    After a crash, some recently accumulated stats may be lost (same behavior as built-in
+    PostgreSQL statistics).
+  </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════════════╗
+     ║  LAYER 3 — DEVELOPER INTERNALS                                 ║
+     ╚══════════════════════════════════════════════════════════════════╝ -->
+<div class="layer" id="layer2">
+
+  <h1>Developer Internals</h1>
+  <p class="lead">
+    Deep dive into implementation details: data structures, locks, hash tables,
+    shared memory layout, and the pgstat framework integration.
+  </p>
+
+  <!-- ── Module: _PG_init ── -->
+  <h2>Module: Initialization (<code>_PG_init</code>)</h2>
+  <div class="card card-accent" style="border-left-color: var(--purple);">
+    <p>On <code>shared_preload_libraries</code> load, <code>_PG_init()</code> performs:</p>
+    <ul style="margin-top:8px;">
+      <li>Registers 6 GUC variables under <code>vacuum_statistics.*</code> prefix with check/assign hooks</li>
+      <li>Registers 2 custom pgstat kinds:
+        <code>PGSTAT_KIND_EXTVAC_RELATION</code> (24) and
+        <code>PGSTAT_KIND_EXTVAC_DB</code> (25)</li>
+      <li>Hooks into <code>set_report_vacuum_hook</code> &rarr; <code>pgstat_report_vacuum_extstats()</code></li>
+      <li>Hooks into <code>shmem_request_hook</code> &rarr; requests LWLock tranche</li>
+      <li>Hooks into <code>object_access_hook</code> &rarr; removes dropped objects from track lists</li>
+      <li>Reserves GUC prefix: <code>MarkGUCPrefixReserved("vacuum_statistics")</code></li>
+    </ul>
+  </div>
+
+  <!-- ── Module: Hook & Filtering ── -->
+  <h2>Module: Hook Entry &amp; Filtering Pipeline</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-pg" style="min-width:500px;">
+        <h4 style="color:var(--blue);">pgstat_report_vacuum() &mdash; PostgreSQL Core</h4>
+        <p>Calls <code>set_report_vacuum_hook(tableoid, shared, &amp;counts)</code></p>
+        <p>Passes <code>PgStat_VacuumRelationCounts</code> struct by pointer</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:500px;">
+        <h4 style="color:var(--purple);">pgstat_report_vacuum_extstats(tableoid, shared, params)</h4>
+        <p><code>dboid = shared ? InvalidOid : MyDatabaseId</code></p>
+        <p>Chains to <code>prev_report_vacuum_hook</code> if set</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="dia-row" style="gap:12px;">
+      <div class="dia-box d-filter" style="flex:1; max-width:400px;">
+        <h4 style="color:var(--cyan);">evs_should_track_relation_statistics(dboid, reloid)</h4>
+        <ul>
+          <li><code>evs_enabled</code> check</li>
+          <li><code>evs_track_bits & EVS_TRACK_RELATIONS</code></li>
+          <li><code>evs_track_relations_bits</code> vs <code>IsCatalogRelationOid()</code></li>
+          <li>If <code>track_relations_from_list</code>: hash lookup in<br><code>evs_track_relations_hash</code></li>
+          <li>If <code>track_databases_from_list</code>: hash lookup in<br><code>evs_track_databases_hash</code></li>
+        </ul>
+      </div>
+      <div class="dia-box d-filter" style="flex:1; max-width:400px;">
+        <h4 style="color:var(--cyan);">evs_should_track_database_statistics(dboid)</h4>
+        <ul>
+          <li><code>evs_track_bits & EVS_TRACK_DATABASES</code></li>
+          <li>If <code>track_databases_from_list</code>: hash lookup in<br><code>evs_track_databases_hash</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:500px;">
+        <h4 style="color:var(--green);">extvac_store(dboid, relid, type, params, store_rel, store_db)</h4>
+        <p>Acquires pgstat entry refs, accumulates counters, unlocks</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: GUC Bitmasks ── -->
+  <h2>Module: GUC Bitmask Internals</h2>
+  <div class="grid2">
+    <div class="card card-accent" style="border-left-color: var(--orange);">
+      <h3 style="color:var(--orange); font-size:14px;">evs_track_bits</h3>
+      <p style="margin-top:6px; font-size:12px;">
+        Derived from <code>vacuum_statistics.object_types</code>
+      </p>
+      <div class="mem-block" style="margin-top:12px;">
+        <div class="field" style="background:rgba(74,222,128,.15); flex:1;">
+          <span class="field-name">bit 0: EVS_TRACK_RELATIONS</span>
+        </div>
+        <div class="field" style="background:rgba(59,130,246,.15); flex:1;">
+          <span class="field-name">bit 1: EVS_TRACK_DATABASES</span>
+        </div>
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        "all" = both bits | "relations" = bit 0 | "databases" = bit 1
+      </p>
+    </div>
+    <div class="card card-accent" style="border-left-color: var(--orange);">
+      <h3 style="color:var(--orange); font-size:14px;">evs_collect_mask</h3>
+      <p style="margin-top:6px; font-size:12px;">
+        Derived from <code>vacuum_statistics.collect</code>
+      </p>
+      <div class="mem-block" style="margin-top:12px;">
+        <div class="field" style="background:rgba(59,130,246,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x1<br>BUFFERS</span>
+        </div>
+        <div class="field" style="background:rgba(74,222,128,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x2<br>WAL</span>
+        </div>
+        <div class="field" style="background:rgba(245,158,11,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x4<br>GENERAL</span>
+        </div>
+        <div class="field" style="background:rgba(168,85,247,.15); flex:1;">
+          <span class="field-name" style="font-size:10px;">0x8<br>TIMING</span>
+        </div>
+      </div>
+      <p style="font-size:12px; color:var(--muted); margin-top:8px;">
+        <code>ACCUM_IF(dst, src, field, cat)</code> &mdash; only accumulates if <code>evs_collect_mask & cat</code>
+      </p>
+    </div>
+  </div>
+
+  <!-- ── Module: Shared Memory Layout ── -->
+  <hr class="sep">
+  <h2>Module: Shared Memory Layout</h2>
+
+  <div class="card">
+    <h3 style="color:var(--green); font-size:14px;">PgStatShared_ExtVacEntry (~232 bytes on x86_64)</h3>
+    <div class="mem-block" style="margin-top:16px; border: 2px solid var(--green); border-radius:8px;">
+      <div class="field" style="background:rgba(100,116,139,.15); flex: 0 0 160px;">
+        <span class="field-name">PgStatShared_Common</span>
+        <span class="field-size">header</span>
+      </div>
+      <div class="field" style="background:rgba(74,222,128,.1); flex: 1; padding:0;">
+        <!-- inner struct -->
+        <div style="padding:6px 10px;">
+          <span class="field-name">PgStat_VacuumRelationCounts stats</span>
+        </div>
+        <div style="display:flex; border-top:1px solid rgba(255,255,255,.1);">
+          <div class="field" style="background:rgba(59,130,246,.1); flex:1;">
+            <span class="field-name" style="font-size:10px;">common</span>
+            <span class="field-size">blks_read, blks_hit,<br>blks_dirtied, blks_written,<br>wal_records, wal_fpi, wal_bytes,<br>blk_read_time, blk_write_time,<br>delay_time, total_time,<br>failsafe, interrupts,<br>tuples_deleted</span>
+          </div>
+          <div class="field" style="background:rgba(245,158,11,.1); flex:1;">
+            <span class="field-name" style="font-size:10px;">union { table | index }</span>
+            <span class="field-size">
+              <strong>TABLE:</strong> pages_scanned,<br>pages_removed,
+              vm_new_frozen,<br>vm_new_visible,
+              vm_new_vis_frz,<br>tuples_frozen,
+              recently_dead,<br>index_vacuum_count,
+              missed_dead_pages,<br>missed_dead_tuples
+              <br><br>
+              <strong>INDEX:</strong> pages_deleted
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: pgstat key encoding ── -->
+  <div class="card card-accent" style="border-left-color: var(--teal);">
+    <h3 style="color:var(--teal); font-size:14px;">Key Encoding for pgstat</h3>
+    <p style="margin-top:8px;">
+      Each pgstat entry is identified by <code>(kind, dboid, objid)</code>.
+      For relations, <code>objid</code> encodes both relation OID and type:
+    </p>
+    <div class="mem-block" style="margin-top:12px; border:2px solid var(--teal); border-radius:8px;">
+      <div class="field" style="background:rgba(45,212,191,.1); flex:3;">
+        <span class="field-name">relid (bits 63..2)</span>
+        <span class="field-size">Relation OID, shifted left by 2</span>
+      </div>
+      <div class="field" style="background:rgba(245,158,11,.15); flex:1;">
+        <span class="field-name">type (bits 1..0)</span>
+        <span class="field-size">0=TABLE, 1=INDEX</span>
+      </div>
+    </div>
+    <p style="margin-top:8px; font-size:12px; color:var(--muted);">
+      <code>#define EXTVAC_OBJID(relid, type) (((uint64)(relid)) &lt;&lt; 2 | ((type) &amp; 3))</code>
+    </p>
+  </div>
+
+  <!-- ── Module: pgstat kinds ── -->
+  <div class="card card-accent" style="border-left-color: var(--green);">
+    <h3 style="color:var(--green); font-size:14px;">Registered pgstat Kinds</h3>
+    <div class="grid2" style="margin-top:12px;">
+      <div>
+        <p><strong>Kind 24: PGSTAT_KIND_EXTVAC_RELATION</strong></p>
+        <ul style="font-size:12px;">
+          <li>Key: <code>(dboid, EXTVAC_OBJID(relid, type))</code></li>
+          <li>Stores per-table or per-index counters</li>
+          <li>Full <code>PgStat_VacuumRelationCounts</code> struct</li>
+        </ul>
+      </div>
+      <div>
+        <p><strong>Kind 25: PGSTAT_KIND_EXTVAC_DB</strong></p>
+        <ul style="font-size:12px;">
+          <li>Key: <code>(dboid, InvalidOid)</code></li>
+          <li>Stores aggregated per-database counters</li>
+          <li>Only common counters (no table/index specifics)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: Hash Tables ── -->
+  <hr class="sep">
+  <h2>Module: Backend-Local Hash Tables (Track Lists)</h2>
+
+  <div class="dia">
+    <div class="dia-row" style="gap: 20px;">
+      <div class="dia-box d-hash" style="flex:1; max-width:420px; text-align:left; padding:20px;">
+        <h4 style="color:var(--teal); text-align:center; margin-bottom:12px;">evs_track_databases_hash</h4>
+        <p style="font-size:12px; text-align:center; margin-bottom:12px;">
+          HTAB* &mdash; backend-local, loaded from file on demand
+        </p>
+        <div style="border:1px solid var(--teal); border-radius:8px; overflow:hidden;">
+          <div style="display:flex; background:rgba(45,212,191,.15); padding:8px 12px; font-size:11px; font-weight:600; border-bottom:1px solid var(--teal);">
+            <span style="flex:1;">Bucket</span>
+            <span style="flex:2;">Key: Oid (dboid)</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[0]</span>
+            <span style="flex:2;"><code>16384</code> (mydb)</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[1]</span>
+            <span style="flex:2;"><code>16385</code> (testdb)</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; color:var(--dim);">
+            <span style="flex:1;">[...]</span>
+            <span style="flex:2;">...</span>
+          </div>
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px; text-align:center;">
+          Simple Oid key &rarr; existence check via <code>hash_search(HASH_FIND)</code>
+        </p>
+      </div>
+
+      <div class="dia-box d-hash" style="flex:1; max-width:420px; text-align:left; padding:20px;">
+        <h4 style="color:var(--teal); text-align:center; margin-bottom:12px;">evs_track_relations_hash</h4>
+        <p style="font-size:12px; text-align:center; margin-bottom:12px;">
+          HTAB* &mdash; backend-local, loaded from file on demand
+        </p>
+        <div style="border:1px solid var(--teal); border-radius:8px; overflow:hidden;">
+          <div style="display:flex; background:rgba(45,212,191,.15); padding:8px 12px; font-size:11px; font-weight:600; border-bottom:1px solid var(--teal);">
+            <span style="flex:1;">Bucket</span>
+            <span style="flex:1;">Key: dboid</span>
+            <span style="flex:1;">Key: reloid</span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[0]</span>
+            <span style="flex:1;"><code>16384</code></span>
+            <span style="flex:1;"><code>24601</code></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; border-bottom:1px solid rgba(255,255,255,.05);">
+            <span style="flex:1; color:var(--dim);">[1]</span>
+            <span style="flex:1;"><code>0</code> <span style="color:var(--dim);">(cluster)</span></span>
+            <span style="flex:1;"><code>1259</code> <span style="color:var(--dim);">(pg_class)</span></span>
+          </div>
+          <div style="display:flex; padding:6px 12px; font-size:11px; color:var(--dim);">
+            <span style="flex:1;">[...]</span>
+            <span style="flex:1;">...</span>
+            <span style="flex:1;">...</span>
+          </div>
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px; text-align:center;">
+          Composite key <code>EvsTrackRelKey {dboid, reloid}</code>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: Lock & File Persistence ── -->
+  <h2>Module: Track List Persistence &amp; Locking</h2>
+
+  <div class="dia">
+    <div class="dia-row" style="gap: 20px; align-items: flex-start;">
+      <div class="dia-box d-lock" style="flex:0 0 200px;">
+        <h4 style="color:var(--red);">LWLock Tranche</h4>
+        <p>"ext_vacuum_statistics_track"</p>
+        <p style="margin-top:6px;">Protects concurrent<br>file reads &amp; writes<br>across backends</p>
+      </div>
+
+      <div style="display:flex; flex-direction:column; align-items: center; flex:1; max-width:500px;">
+        <div class="dia-box d-file" style="width:100%;">
+          <h4 style="color:var(--dim);">pg_stat/ext_vacuum_statistics_track.oid</h4>
+          <div style="text-align:left; margin-top:8px; font-size:12px; font-family:monospace; background:rgba(0,0,0,.3); padding:12px; border-radius:6px; color:var(--muted);">
+            <div style="color:var(--dim);"># format: one entry per line</div>
+            <div style="color:var(--cyan);">16384</div>
+            <div style="color:var(--dim);"># ^ database OID</div>
+            <div style="color:var(--teal);">16384 24601</div>
+            <div style="color:var(--dim);"># ^ dboid reloid (relation)</div>
+            <div style="color:var(--teal);">0 1259</div>
+            <div style="color:var(--dim);"># ^ cluster-wide (dboid=0) relation</div>
+          </div>
+        </div>
+
+        <div style="margin-top:12px; font-size:12px; color:var(--muted);">
+          <p><strong>Load:</strong> <code>evs_track_load_file()</code> &mdash; on demand, first access per backend</p>
+          <p><strong>Save:</strong> <code>evs_track_save_file()</code> &mdash; on every add/remove mutation</p>
+          <p><strong>Cleanup:</strong> <code>evs_drop_access_hook()</code> &mdash; on DROP TABLE/DATABASE</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: Accumulation Detail ── -->
+  <hr class="sep">
+  <h2>Module: Accumulation Functions</h2>
+
+  <div class="card">
+    <h3 style="color:var(--green); font-size:14px;">extvac_store() &mdash; Core Storage Logic</h3>
+    <div style="font-size:13px; margin-top:12px; font-family:monospace; background:rgba(0,0,0,.3); padding:16px; border-radius:8px; line-height:1.8; overflow-x:auto;">
+      <span style="color:var(--dim);">// Per-relation storage</span><br>
+      <span style="color:var(--cyan);">if</span> (store_relation) {<br>
+      &nbsp;&nbsp;objid = <span style="color:var(--teal);">EXTVAC_OBJID</span>(relid, type);<br>
+      &nbsp;&nbsp;entry_ref = <span style="color:var(--amber);">pgstat_get_entry_ref_locked</span>(<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green);">PGSTAT_KIND_EXTVAC_RELATION</span>, dboid, objid, <span style="color:var(--pink);">false</span>);<br>
+      &nbsp;&nbsp;shared = (PgStatShared_ExtVacEntry *) entry_ref-&gt;shared_stats;<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_accumulate_extvac_stats</span>(&amp;shared-&gt;stats, params);<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_unlock_entry</span>(entry_ref);<br>
+      }<br><br>
+      <span style="color:var(--dim);">// Per-database aggregation</span><br>
+      <span style="color:var(--cyan);">if</span> (store_db) {<br>
+      &nbsp;&nbsp;entry_ref = <span style="color:var(--amber);">pgstat_get_entry_ref_locked</span>(<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green);">PGSTAT_KIND_EXTVAC_DB</span>, dboid, <span style="color:var(--pink);">InvalidOid</span>, <span style="color:var(--pink);">false</span>);<br>
+      &nbsp;&nbsp;shared = (PgStatShared_ExtVacEntry *) entry_ref-&gt;shared_stats;<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_accumulate_common_for_db</span>(&amp;shared-&gt;stats.common, &amp;params-&gt;common);<br>
+      &nbsp;&nbsp;<span style="color:var(--amber);">pgstat_unlock_entry</span>(entry_ref);<br>
+      }
+    </div>
+  </div>
+
+  <div class="card card-accent" style="border-left-color: var(--orange);">
+    <h3 style="color:var(--orange); font-size:14px;">ACCUM_IF Macro &mdash; Category-Selective Accumulation</h3>
+    <div style="font-size:13px; margin-top:12px; font-family:monospace; background:rgba(0,0,0,.3); padding:16px; border-radius:8px; line-height:1.8;">
+      <span style="color:var(--purple);">#define</span> <span style="color:var(--amber);">ACCUM_IF</span>(dst, src, field, cat) \<br>
+      &nbsp;&nbsp;<span style="color:var(--cyan);">do</span> { \<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--cyan);">if</span> (evs_collect_mask &amp; (cat)) \<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(dst)-&gt;field += (src)-&gt;field; \<br>
+      &nbsp;&nbsp;} <span style="color:var(--cyan);">while</span>(0)
+    </div>
+    <p style="margin-top:12px; font-size:12px; color:var(--muted);">
+      Every counter field is guarded by its category bit. If <code>vacuum_statistics.collect = 'buffers,timing'</code>,
+      then WAL and general counters are zeroed out &mdash; they still exist in the struct but never get incremented.
+    </p>
+  </div>
+
+  <!-- ── Module: Output Functions ── -->
+  <hr class="sep">
+  <h2>Module: Output Pipeline</h2>
+
+  <div class="dia">
+    <div class="dia-row">
+      <div class="dia-box d-out" style="min-width:280px;">
+        <h4 style="color:var(--amber);">SQL View: pg_stats_vacuum_tables</h4>
+        <p>JOINs pg_class + pg_database<br>
+        Calls C function for each row</p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-hook" style="min-width:400px;">
+        <h4 style="color:var(--purple);">pg_stats_get_vacuum_tables(dboid, reloid)</h4>
+        <p>Wrapper &rarr; <code>pg_stats_vacuum(fcinfo, PGSTAT_EXTVAC_TABLE)</code></p>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-store" style="min-width:500px; text-align:left; padding:18px 24px;">
+        <h4 style="color:var(--green); text-align:center; margin-bottom:8px;">pg_stats_vacuum(fcinfo, type)</h4>
+        <ul style="font-size:12px;">
+          <li>Computes <code>objid = EXTVAC_OBJID(relid, type)</code></li>
+          <li>Calls <code>pgstat_fetch_entry(PGSTAT_KIND_EXTVAC_RELATION, dbid, objid)</code></li>
+          <li>Falls back to cluster entry (<code>dboid=InvalidOid</code>) for shared catalogs</li>
+          <li>Converts to tuplestore via <code>tuplestore_put_for_relation()</code></li>
+          <li>For DB: fetches kind 25, uses <code>tuplestore_put_common()</code> + interrupts_count</li>
+        </ul>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="dia-row">
+      <div class="dia-box d-user" style="min-width:300px;">
+        <div class="person-wrap">
+          <svg width="44" height="44" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="14" r="10" fill="var(--pink)" opacity=".7"/>
+            <path d="M6 44c0-10 8-18 18-18s18 8 18 18" fill="var(--pink)" opacity=".5"/>
+          </svg>
+          <span class="person-label" style="color:var(--pink);">DBA</span>
+          <p style="font-size:11px; color:var(--muted);">Receives tuplestore as SQL result set</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Module: Cleanup on DROP ── -->
+  <h2>Module: Cleanup on DROP</h2>
+  <div class="card card-accent" style="border-left-color: var(--red);">
+    <h3 style="color:var(--red); font-size:14px;">evs_drop_access_hook() &mdash; object_access_hook</h3>
+    <p style="margin-top:8px;">
+      When a table or database is dropped, PostgreSQL fires the <code>object_access_hook</code>.
+      The extension catches <code>OAT_DROP</code> events and:
+    </p>
+    <ul style="margin-top:8px;">
+      <li>Removes the OID from <code>evs_track_relations_hash</code> / <code>evs_track_databases_hash</code></li>
+      <li>Saves the updated track list to disk</li>
+      <li>The pgstat entry itself is cleaned up by the pgstat framework automatically</li>
+    </ul>
+  </div>
+
+</div><!-- /layer2 -->
+
+<script>
+function switchTab(idx) {
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+  document.querySelectorAll('.layer').forEach((l, i) => l.classList.toggle('active', i === idx));
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+</script>
+
+</body>
+</html>

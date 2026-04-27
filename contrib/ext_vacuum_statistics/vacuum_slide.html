@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VACUUM Phases &amp; Statistics Collection</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 100vh; padding: 40px;
+  }
+
+  h1 { font-size: 28px; text-align: center; margin-bottom: 6px; }
+  .subtitle { font-size: 14px; color: #94a3b8; text-align: center; margin-bottom: 40px; }
+
+  /* ── main layout: 3 columns + arrows ── */
+  .diagram {
+    display: flex; align-items: flex-start; gap: 0;
+    max-width: 1200px; width: 100%;
+  }
+
+  /* ── phase box (big rounded rectangle) ── */
+  .phase {
+    flex: 1; border-radius: 18px; padding: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+
+  /* phase header */
+  .phase-head {
+    padding: 14px 20px; font-size: 16px; font-weight: 700;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .phase-head .num {
+    font-size: 14px; font-weight: 800; width: 26px; height: 26px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* phase body: stacked steps */
+  .phase-body {
+    padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 0;
+    flex: 1;
+  }
+
+  /* ── individual step row ── */
+  .step {
+    padding: 10px 14px; font-size: 14px; line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .step:last-child { border-bottom: none; }
+
+  .step-icon {
+    font-size: 16px; flex-shrink: 0; width: 22px; text-align: center;
+  }
+  .step-text { flex: 1; }
+  .step-text strong { font-weight: 700; }
+  .step-sub { font-size: 13px; color: #94a3b8; margin-top: 2px; }
+
+  /* ── report box (highlighted, like your red-bordered sketch) ── */
+  .report {
+    margin: 8px 14px 14px; padding: 12px 16px;
+    border-radius: 12px; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+    border: 2px solid;
+  }
+  .report-icon { font-size: 18px; flex-shrink: 0; }
+
+  /* ── colors per phase ── */
+  .p1 { background: rgba(56,189,248,.06); border: 2px solid #38bdf8; }
+  .p1 .phase-head { background: rgba(56,189,248,.12); color: #38bdf8; }
+  .p1 .num { background: #38bdf8; color: #0f172a; }
+
+  .p2 { background: rgba(168,85,247,.06); border: 2px solid #a855f7; }
+  .p2 .phase-head { background: rgba(168,85,247,.12); color: #a855f7; }
+  .p2 .num { background: #a855f7; color: #fff; }
+
+  .p3 { background: rgba(251,113,133,.06); border: 2px solid #fb7185; }
+  .p3 .phase-head { background: rgba(251,113,133,.12); color: #fb7185; }
+  .p3 .num { background: #fb7185; color: #0f172a; }
+
+  /* report colors */
+  .r-index {
+    background: rgba(74,222,128,.08); border-color: #4ade80; color: #4ade80;
+  }
+  .r-table {
+    background: rgba(74,222,128,.08); border-color: #4ade80; color: #4ade80;
+  }
+
+  /* ── horizontal arrow between phases ── */
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 48px; flex-shrink: 0; padding-top: 60px;
+  }
+  .arrow svg { display: block; }
+
+  /* ── footer note ── */
+  .footnote {
+    margin-top: 28px; font-size: 14px; color: #f59e0b; text-align: center;
+    padding: 10px 24px; background: rgba(245,158,11,.06);
+    border: 1px dashed rgba(245,158,11,.3); border-radius: 10px;
+    max-width: 1200px; width: 100%;
+  }
+</style>
+</head>
+<body>
+
+<h1>VACUUM Phases &amp; Statistics Collection</h1>
+<p class="subtitle">How PostgreSQL vacuum works and where ext_vacuum_statistics hooks in</p>
+
+<div class="diagram">
+
+  <!-- ════════ PHASE 1: Scan Table ════════ -->
+  <div class="phase p1">
+    <div class="phase-head">
+      <span class="num">I</span>
+      Scan Table
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x1F50D;</span>
+        <div class="step-text">
+          <strong>Scan every page</strong>
+          <div class="step-sub">Read heap pages sequentially</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x2744;</span>
+        <div class="step-text">
+          <strong>Prune &amp; freeze tuples</strong>
+          <div class="step-sub">Remove dead versions, freeze old rows</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4CB;</span>
+        <div class="step-text">
+          <strong>Collect dead TIDs</strong>
+          <div class="step-sub">Store in TidStore for Phase II.<br>Can't clean heap yet &mdash; indexes still point here</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow 1→2 -->
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ════════ PHASE 2: Index Vacuum & Cleanup ════════ -->
+  <div class="phase p2">
+    <div class="phase-head">
+      <span class="num">II</span>
+      Index Vacuum &amp; Cleanup
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x2702;</span>
+        <div class="step-text">
+          <strong>Bulk delete</strong>
+          <div class="step-sub">Remove index entries pointing to dead TIDs</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F9F9;</span>
+        <div class="step-text">
+          <strong>Index cleanup</strong>
+          <div class="step-sub">Reclaim empty pages, update index metapage</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INDEX REPORT -->
+    <div class="report r-index">
+      <span class="report-icon">&#x1F4E4;</span>
+      Index report &rarr; extension
+    </div>
+  </div>
+
+  <!-- Arrow 2→3 -->
+  <div class="arrow">
+    <svg width="36" height="24" viewBox="0 0 36 24">
+      <line x1="0" y1="12" x2="26" y2="12" stroke="#64748b" stroke-width="2"/>
+      <polygon points="26,6 36,12 26,18" fill="#64748b"/>
+    </svg>
+  </div>
+
+  <!-- ════════ PHASE 3: Table Processing ════════ -->
+  <div class="phase p3">
+    <div class="phase-head">
+      <span class="num">III</span>
+      Table Processing
+    </div>
+    <div class="phase-body">
+      <div class="step">
+        <span class="step-icon">&#x267B;</span>
+        <div class="step-text">
+          <strong>Table cleanup</strong>
+          <div class="step-sub">LP_DEAD &rarr; LP_UNUSED, reclaim space</div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-icon">&#x1F4CA;</span>
+        <div class="step-text">
+          <strong>Table stats summary</strong>
+          <div class="step-sub">pages scanned, tuples frozen, VM updates,<br>buffer/WAL <em>minus</em> index I/O</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABLE REPORT -->
+    <div class="report r-table">
+      <span class="report-icon">&#x1F4E4;</span>
+      Table report &rarr; extension
+    </div>
+  </div>
+
+</div>
+
+<div class="footnote">
+  If TidStore fills up mid-scan, Phases I &rarr; II &rarr; III loop on each batch until the whole table is done.
+</div>
+
+</body>
+</html>
