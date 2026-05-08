@@ -2551,11 +2551,11 @@ select count(*) from date_tbl
 explain (costs off)
 select count(*) from date_tbl
   where f1 between symmetric '1997-01-01' and '1998-01-01';
-                                                                  QUERY PLAN                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
  Aggregate
    ->  Seq Scan on date_tbl
-         Filter: (((f1 >= '01-01-1997'::date) AND (f1 <= '01-01-1998'::date)) OR ((f1 >= '01-01-1998'::date) AND (f1 <= '01-01-1997'::date)))
+         Filter: ((f1 >= '01-01-1997'::date) AND (f1 <= '01-01-1998'::date))
 (3 rows)
 
 select count(*) from date_tbl
@@ -2568,11 +2568,11 @@ select count(*) from date_tbl
 explain (costs off)
 select count(*) from date_tbl
   where f1 not between symmetric '1997-01-01' and '1998-01-01';
-                                                               QUERY PLAN                                                                
------------------------------------------------------------------------------------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Aggregate
    ->  Seq Scan on date_tbl
-         Filter: (((f1 < '01-01-1997'::date) OR (f1 > '01-01-1998'::date)) AND ((f1 < '01-01-1998'::date) OR (f1 > '01-01-1997'::date)))
+         Filter: ((f1 < '01-01-1997'::date) OR (f1 > '01-01-1998'::date))
 (3 rows)
 
 select count(*) from date_tbl

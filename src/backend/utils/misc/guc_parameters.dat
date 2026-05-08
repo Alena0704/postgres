@@ -938,6 +938,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_mdam', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables Append-OR index scan optimization for OR clauses.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_mdam',
+  boot_val => 'true',
+},
+
 { name => 'enable_memoize', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of memoization.',
   flags => 'GUC_EXPLAIN',

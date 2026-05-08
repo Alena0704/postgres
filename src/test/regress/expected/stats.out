@@ -1891,7 +1891,7 @@ EXPLAIN (COSTS OFF) SELECT * FROM brin_hot_2 WHERE a = 2 AND b = 100;
             QUERY PLAN             
 -----------------------------------
  Seq Scan on brin_hot_2
-   Filter: ((a = 2) AND (b = 100))
+   Filter: ((b = 100) AND (a = 2))
 (2 rows)
 
 SELECT COUNT(*) FROM brin_hot_2 WHERE a = 2 AND b = 100;

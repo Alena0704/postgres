@@ -169,7 +169,6 @@ static List *fix_indexorderby_references(PlannerInfo *root, IndexPath *index_pat
 static Node *fix_indexqual_clause(PlannerInfo *root,
 								  IndexOptInfo *index, int indexcol,
 								  Node *clause, List *indexcolnos);
-static Node *fix_indexqual_operand(Node *node, IndexOptInfo *index, int indexcol);
 static List *get_switched_clauses(List *clauses, Relids outerrelids);
 static List *order_qual_clauses(PlannerInfo *root, List *clauses);
 static void copy_generic_path_info(Plan *dest, Path *src);
@@ -1265,6 +1264,7 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	plan->plan.righttree = NULL;
 	plan->apprelids = rel->relids;
 	plan->child_append_relid_sets = best_path->child_append_relid_sets;
+	plan->is_mdam = best_path->is_mdam;
 
 	if (pathkeys != NIL)
 	{
@@ -5104,7 +5104,7 @@ fix_indexqual_clause(PlannerInfo *root, IndexOptInfo *index, int indexcol,
  * expression actually matches the index column it's claimed to.  It should
  * match the logic in match_index_to_operand().
  */
-static Node *
+Node *
 fix_indexqual_operand(Node *node, IndexOptInfo *index, int indexcol)
 {
 	Var		   *result;

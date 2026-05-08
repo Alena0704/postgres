@@ -2720,7 +2720,7 @@ WHEN NOT MATCHED THEN INSERT
    ->  Nested Loop Left Join
          ->  Result
          ->  Seq Scan on measurement_y2007m01 m_1
-               Filter: ((city_id = 1) AND (logdate = '01-17-2007'::date))
+               Filter: ((logdate = '01-17-2007'::date) AND (city_id = 1))
 (6 rows)
 
 BEGIN;

@@ -1343,7 +1343,7 @@ create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
  *
  * Note that we must handle subpaths = NIL, representing a dummy access path.
  * Also, there are callers that pass root = NULL.
- *
+ * 
  * 'rows', when passed as a non-negative number, will be used to overwrite the
  * returned path's row estimate.  Otherwise, the row estimate is calculated
  * by totalling the row estimates from the 'subpaths' list.
@@ -1355,6 +1355,19 @@ create_append_path(PlannerInfo *root,
 				   List *pathkeys, Relids required_outer,
 				   int parallel_workers, bool parallel_aware,
 				   double rows)
+{
+	return create_append_path_ext(root, rel, input,
+								  pathkeys, required_outer, parallel_workers,
+								  parallel_aware, rows, false, -1.0);
+}
+
+AppendPath *
+create_append_path_ext(PlannerInfo *root,
+				   RelOptInfo *rel,
+				   AppendPathInput input,
+				   List *pathkeys, Relids required_outer,
+				   int parallel_workers, bool parallel_aware,
+				   double rows, bool pull_tlist, Selectivity selectivity)
 {
 	AppendPath *pathnode = makeNode(AppendPath);
 	ListCell   *l;
@@ -1389,6 +1402,7 @@ create_append_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.parallel_workers = parallel_workers;
 	pathnode->path.pathkeys = pathkeys;
+	pathnode->pull_tlist = pull_tlist;
 
 	/*
 	 * For parallel append, non-partial paths are sorted by descending total
@@ -1426,6 +1440,24 @@ create_append_path(PlannerInfo *root,
 	foreach(l, pathnode->subpaths)
 	{
 		Path	   *subpath = (Path *) lfirst(l);
+
+		/*
+		 * We correct the cardinality in the subplan node only
+		 * for the AppendOrPath node, as was done in the bitmapscan node
+		 * (for more information, see the cost_bitmap_and_node function).
+		 * We don't do this for the partition table because
+		 * the function doesn't work with it.
+		*/
+		if (selectivity >= 0.0)
+		{
+			Cardinality subrows = clamp_row_est(selectivity * rel->tuples);
+
+			/* Is it possible to get a parameterized node? */
+			if (subpath->param_info)
+				subpath->param_info->ppi_rows = subrows;
+			else
+				subpath->rows =	subrows;
+		}
 
 		pathnode->path.parallel_safe = pathnode->path.parallel_safe &&
 			subpath->parallel_safe;
@@ -1515,11 +1547,6 @@ append_startup_cost_compare(const ListCell *a, const ListCell *b)
 	return bms_compare(path1->parent->relids, path2->parent->relids);
 }
 
-/*
- * create_merge_append_path
- *	  Creates a path corresponding to a MergeAppend plan, returning the
- *	  pathnode.
- */
 MergeAppendPath *
 create_merge_append_path(PlannerInfo *root,
 						 RelOptInfo *rel,
@@ -1527,6 +1554,25 @@ create_merge_append_path(PlannerInfo *root,
 						 List *child_append_relid_sets,
 						 List *pathkeys,
 						 Relids required_outer)
+{
+	return create_merge_append_path_ext(root, rel, subpaths,
+										child_append_relid_sets,
+										pathkeys, required_outer, -1);
+}
+
+/*
+ * create_merge_append_path_ext
+ *	  Creates a path corresponding to a MergeAppend plan, returning the
+ *	  pathnode.  When selectivity >= 0, corrects subpath row estimates.
+ */
+MergeAppendPath *
+create_merge_append_path_ext(PlannerInfo *root,
+							 RelOptInfo *rel,
+							 List *subpaths,
+							 List *child_append_relid_sets,
+							 List *pathkeys,
+							 Relids required_outer,
+							 double selectivity)
 {
 	MergeAppendPath *pathnode = makeNode(MergeAppendPath);
 	int			input_disabled_nodes;
@@ -1580,6 +1626,28 @@ create_merge_append_path(PlannerInfo *root,
 		pathnode->path.rows += subpath->rows;
 		pathnode->path.parallel_safe = pathnode->path.parallel_safe &&
 			subpath->parallel_safe;
+
+		/*
+		 * We correct the cardinality in the subplan node only
+		 * for the AppendOrPath node, as was done in the bitmapscan node
+		 * (for more information, see the cost_bitmap_and_node function).
+		 * We don't do this for the partition table because
+		 * the function doesn't work with it.
+		*/
+		if (selectivity >= 0.0)
+		{
+			double subrows = clamp_row_est(selectivity * rel->tuples);
+
+			/* Parent relation must match for non-partitioned append */
+			Assert(pathnode->path.parent->relid == subpath->parent->relid ||
+				   !IsA(subpath, IndexPath));
+
+			/* Is it possible to get a parameterized node? */
+			if (subpath->param_info)
+				subpath->param_info->ppi_rows = subrows;
+			else
+				subpath->rows =	subrows;
+		}
 
 		if (!pathkeys_count_contained_in(pathkeys, subpath->pathkeys,
 										 &presorted_keys))

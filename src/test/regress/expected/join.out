@@ -2566,7 +2566,7 @@ where t1.f1 = coalesce(t2.f1, 1);
                      QUERY PLAN                     
 ----------------------------------------------------
  Nested Loop Left Join
-   Join Filter: ((t2.f1 > 2) AND (t3.f1 > 3))
+   Join Filter: ((t3.f1 > 3) AND (t2.f1 > 2))
    ->  Nested Loop Left Join
          Join Filter: (t2.f1 > 0)
          ->  Nested Loop Left Join
@@ -4768,7 +4768,7 @@ select * from tenk1 a join tenk1 b on
                                            QUERY PLAN                                            
 -------------------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: (((a.unique1 = 1) AND (b.unique1 = 2)) OR ((a.unique2 = 3) AND (b.hundred = 4)))
+   Join Filter: (((b.unique1 = 2) AND (a.unique1 = 1)) OR ((b.hundred = 4) AND (a.unique2 = 3)))
    ->  Bitmap Heap Scan on tenk1 b
          Recheck Cond: ((unique1 = 2) OR (hundred = 4))
          ->  BitmapOr
@@ -4792,7 +4792,7 @@ select * from tenk1 a join tenk1 b on
                                          QUERY PLAN                                          
 ---------------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: (((a.unique1 = 1) AND (b.unique1 = 2)) OR ((a.unique2 = 3) AND (b.ten = 4)))
+   Join Filter: (((b.unique1 = 2) AND (a.unique1 = 1)) OR ((b.ten = 4) AND (a.unique2 = 3)))
    ->  Seq Scan on tenk1 b
          Filter: ((unique1 = 2) OR (ten = 4))
    ->  Materialize
@@ -4812,7 +4812,7 @@ select * from tenk1 a join tenk1 b on
                                                       QUERY PLAN                                                      
 ----------------------------------------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: (((a.unique1 = 1) AND (b.unique1 = 2)) OR (((a.unique2 = 3) OR (a.unique2 = 7)) AND (b.hundred = 4)))
+   Join Filter: (((b.unique1 = 2) AND (a.unique1 = 1)) OR ((b.hundred = 4) AND ((a.unique2 = 3) OR (a.unique2 = 7))))
    ->  Bitmap Heap Scan on tenk1 b
          Recheck Cond: ((unique1 = 2) OR (hundred = 4))
          ->  BitmapOr
@@ -4838,7 +4838,7 @@ select * from tenk1 a join tenk1 b on
                                                       QUERY PLAN                                                      
 ----------------------------------------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: (((a.unique1 = 1) AND (b.unique1 = 2)) OR (((a.unique2 = 3) OR (a.unique2 = 7)) AND (b.hundred = 4)))
+   Join Filter: (((b.unique1 = 2) AND (a.unique1 = 1)) OR ((b.hundred = 4) AND ((a.unique2 = 3) OR (a.unique2 = 7))))
    ->  Bitmap Heap Scan on tenk1 b
          Recheck Cond: ((unique1 = 2) OR (hundred = 4))
          ->  BitmapOr
@@ -4864,7 +4864,7 @@ select * from tenk1 a join tenk1 b on
                                                                          QUERY PLAN                                                                          
 -------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
-   Join Filter: ((a.unique1 < 20) OR (a.unique1 = 3) OR ((a.unique1 = 1) AND (b.unique1 = 2)) OR (((a.unique2 = 3) OR (a.unique2 = 7)) AND (b.hundred = 4)))
+   Join Filter: ((a.unique1 < 20) OR (a.unique1 = 3) OR ((b.unique1 = 2) AND (a.unique1 = 1)) OR ((b.hundred = 4) AND ((a.unique2 = 3) OR (a.unique2 = 7))))
    ->  Seq Scan on tenk1 b
    ->  Materialize
          ->  Bitmap Heap Scan on tenk1 a
@@ -6603,7 +6603,7 @@ select p.* from
         QUERY PLAN        
 --------------------------
  Result
-   Replaces: Join on p, x
+   Replaces: Scan on x
    One-Time Filter: false
 (3 rows)
 
@@ -7545,7 +7545,7 @@ SELECT * FROM sj j1, sj j2
                      QUERY PLAN                      
 -----------------------------------------------------
  Seq Scan on sj j2
-   Filter: ((b IS NOT NULL) AND (a = 2) AND (c = 3))
+   Filter: ((b IS NOT NULL) AND (c = 3) AND (a = 2))
 (2 rows)
 
 -- Don't remove SJ
@@ -7557,7 +7557,7 @@ EXPLAIN (COSTS OFF)
  Nested Loop
    Join Filter: (j1.b = j2.b)
    ->  Seq Scan on sj j1
-         Filter: ((2 = a) AND (c = 3))
+         Filter: ((c = 3) AND (a = 2))
    ->  Seq Scan on sj j2
          Filter: ((c = 3) AND (a = 1))
 (6 rows)
@@ -7583,7 +7583,7 @@ SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND 2 = j2.a;
  Nested Loop
    Join Filter: (j1.b = j2.b)
    ->  Seq Scan on sj j2
-         Filter: (2 = a)
+         Filter: (a = 2)
    ->  Seq Scan on sj j1
 (5 rows)
 

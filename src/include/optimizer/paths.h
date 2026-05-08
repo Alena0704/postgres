@@ -89,6 +89,7 @@ extern bool indexcol_is_bool_constant_for_query(PlannerInfo *root,
 extern bool match_index_to_operand(Node *operand, int indexcol,
 								   IndexOptInfo *index);
 extern Node *strip_phvs_in_index_operand(Node *operand);
+extern bool check_index_only(RelOptInfo *rel, IndexOptInfo *index);
 extern void check_index_predicates(PlannerInfo *root, RelOptInfo *rel);
 
 /*
@@ -286,5 +287,6 @@ extern PathKey *make_canonical_pathkey(PlannerInfo *root,
 									   CompareType cmptype, bool nulls_first);
 extern void add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 									List *live_childrels);
-
+extern void try_generate_append_or_path(PlannerInfo *root, RelOptInfo *rel,
+										List *orpaths);
 #endif							/* PATHS_H */

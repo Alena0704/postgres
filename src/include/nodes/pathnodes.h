@@ -2286,6 +2286,10 @@ typedef struct AppendPath
 	int			first_partial_path;
 	Cardinality limit_tuples;	/* hard limit on output tuples, or -1 */
 	List	   *child_append_relid_sets;
+	bool		pull_tlist;		/* if true, create_append_plan() should get
+								 * targetlist from subpath (used by append
+								 * index scan for range OR) */
+	bool		is_mdam;		/* Append-OR index scan optimization? */
 } AppendPath;
 
 #define IS_DUMMY_APPEND(p) \
@@ -2948,6 +2952,16 @@ typedef struct RestrictInfo
 	 * is an OR clause.
 	 */
 	Expr	   *orclause pg_node_attr(equal_ignore);
+
+	/*
+	 * Hint set by prepqual.c when this clause looks like a potential MDAM
+	 * candidate, i.e. an OR of comparison/AND conjuncts on Var=Const-style
+	 * predicates that *could* be served by an Append-of-IndexScans plan
+	 * over a single multi-column btree index.  Final viability is decided
+	 * later in mdampath.c, which checks index matching and column types.
+	 * This is a fast-path filter to skip non-OR / non-comparison RestrictInfos.
+	 */
+	bool		mdam_candidate pg_node_attr(equal_ignore);
 
 	/*----------
 	 * Serial number of this RestrictInfo.  This is unique within the current

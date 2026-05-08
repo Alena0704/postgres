@@ -30,6 +30,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/mdampath.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "utils/lsyscache.h"
@@ -107,10 +108,12 @@ static List *build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 							   bool useful_predicate,
 							   ScanTypeControl scantype,
 							   bool *skip_nonnative_saop);
-static List *build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
-								List *clauses, List *other_clauses);
+static List *
+build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
+				   List *clauses, List *other_clauses, bool appendor_path);
 static List *generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
-									  List *clauses, List *other_clauses);
+									  List *clauses, List *other_clauses,
+									  bool append_or_path);
 static Path *choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 							   List *paths);
 static int	path_usage_comparator(const void *a, const void *b);
@@ -122,7 +125,7 @@ static PathClauseUsage *classify_index_clause_usage(Path *path,
 													List **clauselist);
 static void find_indexpath_quals(Path *bitmapqual, List **quals, List **preds);
 static int	find_list_position(Node *node, List **nodelist);
-static bool check_index_only(RelOptInfo *rel, IndexOptInfo *index);
+/* now extern — also used by mdampath.c */
 static double get_loop_count(PlannerInfo *root, Index cur_relid, Relids outer_relids);
 static double adjust_rowcount_for_semijoins(PlannerInfo *root,
 											Index cur_relid,
@@ -320,7 +323,7 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 	 * restriction list.  Add these to bitindexpaths.
 	 */
 	indexpaths = generate_bitmap_or_paths(root, rel,
-										  rel->baserestrictinfo, NIL);
+										  rel->baserestrictinfo, NIL, false);
 	bitindexpaths = list_concat(bitindexpaths, indexpaths);
 
 	/*
@@ -328,8 +331,16 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel)
 	 * the joinclause list.  Add these to bitjoinpaths.
 	 */
 	indexpaths = generate_bitmap_or_paths(root, rel,
-										  joinorclauses, rel->baserestrictinfo);
+										  joinorclauses, rel->baserestrictinfo,false);
 	bitjoinpaths = list_concat(bitjoinpaths, indexpaths);
+
+	/*
+	 * Generate MDAM-style Append-of-IndexScans paths for OR predicates
+	 * involving multiple columns of a single multi-column B-tree index.
+	 * These paths preserve index ordering and can use index-only scans,
+	 * unlike the bitmap paths above.
+	 */
+	generate_mdam_or_paths(root, rel);
 
 	/*
 	 * If we found anything usable, generate a BitmapHeapPath for the most
@@ -827,7 +838,9 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	bool		index_only_scan;
 	int			indexcol;
 
-	Assert(skip_nonnative_saop != NULL || scantype == ST_BITMAPSCAN);
+	/* Relaxed: appendor path uses ST_INDEXSCAN with skip_nonnative_saop=NULL */
+	Assert(skip_nonnative_saop != NULL || scantype == ST_BITMAPSCAN ||
+		   scantype == ST_INDEXSCAN);
 
 	/*
 	 * Check that index supports the desired scan type(s)
@@ -1090,7 +1103,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
  */
 static List *
 build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
-				   List *clauses, List *other_clauses)
+				   List *clauses, List *other_clauses, bool appendor_path)
 {
 	List	   *result = NIL;
 	List	   *all_clauses = NIL;	/* not computed till needed */
@@ -1161,11 +1174,18 @@ build_paths_for_OR(PlannerInfo *root, RelOptInfo *rel,
 		/*
 		 * Construct paths if possible.
 		 */
-		indexpaths = build_index_paths(root, rel,
-									   index, &clauseset,
-									   useful_predicate,
-									   ST_BITMAPSCAN,
-									   NULL);
+		if(!appendor_path)
+			indexpaths = build_index_paths(root, rel,
+										index, &clauseset,
+										useful_predicate,
+										ST_BITMAPSCAN,
+										NULL);
+		else
+			indexpaths = build_index_paths(root, rel,
+										index, &clauseset,
+										useful_predicate,
+										ST_INDEXSCAN,
+										NULL);
 		result = list_concat(result, indexpaths);
 	}
 
@@ -1564,7 +1584,7 @@ make_bitmap_paths_for_or_group(PlannerInfo *root, RelOptInfo *rel,
 	orargs = list_make1(ri);
 	indlist = build_paths_for_OR(root, rel,
 								 orargs,
-								 other_clauses);
+								 other_clauses, false);
 	if (indlist != NIL)
 	{
 		bitmapqual = choose_bitmap_and(root, rel, indlist);
@@ -1590,7 +1610,7 @@ make_bitmap_paths_for_or_group(PlannerInfo *root, RelOptInfo *rel,
 
 		indlist = build_paths_for_OR(root, rel,
 									 orargs,
-									 other_clauses);
+									 other_clauses, false);
 
 		if (indlist == NIL)
 		{
@@ -1627,7 +1647,7 @@ make_bitmap_paths_for_or_group(PlannerInfo *root, RelOptInfo *rel,
  */
 static List *
 generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
-						 List *clauses, List *other_clauses)
+						 List *clauses, List *other_clauses, bool append_or_path)
 {
 	List	   *result = NIL;
 	List	   *all_clauses;
@@ -1691,13 +1711,13 @@ generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
 
 				indlist = build_paths_for_OR(root, rel,
 											 andargs,
-											 all_clauses);
+											 all_clauses, append_or_path);
 
 				/* Recurse in case there are sub-ORs */
 				indlist = list_concat(indlist,
 									  generate_bitmap_or_paths(root, rel,
 															   andargs,
-															   all_clauses));
+															   all_clauses, false));
 			}
 			else if (restriction_is_or_clause(castNode(RestrictInfo, orarg)))
 			{
@@ -1731,7 +1751,7 @@ generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
 
 				indlist = build_paths_for_OR(root, rel,
 											 orargs,
-											 all_clauses);
+											 all_clauses, append_or_path);
 			}
 
 			/*
@@ -1765,6 +1785,13 @@ generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
 			result = lappend(result, bitmapqual);
 		}
 	}
+
+	/*
+	 * Note: try_generate_append_or_path() is not called here because MDAM
+	 * (generate_mdam_or_paths) handles Append-OR path generation directly,
+	 * including backward scan and MergeAppend.  The appendorpath.c code
+	 * remains available as a simpler fallback if needed in the future.
+	 */
 
 	return result;
 }
@@ -2223,7 +2250,7 @@ find_list_position(Node *node, List **nodelist)
  * check_index_only
  *		Determine whether an index-only scan is possible for this index.
  */
-static bool
+bool
 check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 {
 	bool		result;
