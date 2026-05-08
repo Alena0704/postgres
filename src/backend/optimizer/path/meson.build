@@ -2,7 +2,6 @@
 
 backend_sources += files(
   'allpaths.c',
-  'appendorpath.c',
   'clausesel.c',
   'costsize.c',
   'equivclass.c',

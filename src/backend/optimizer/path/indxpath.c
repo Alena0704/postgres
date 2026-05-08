@@ -1786,13 +1786,6 @@ generate_bitmap_or_paths(PlannerInfo *root, RelOptInfo *rel,
 		}
 	}
 
-	/*
-	 * Note: try_generate_append_or_path() is not called here because MDAM
-	 * (generate_mdam_or_paths) handles Append-OR path generation directly,
-	 * including backward scan and MergeAppend.  The appendorpath.c code
-	 * remains available as a simpler fallback if needed in the future.
-	 */
-
 	return result;
 }
 

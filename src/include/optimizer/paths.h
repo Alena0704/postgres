@@ -287,6 +287,4 @@ extern PathKey *make_canonical_pathkey(PlannerInfo *root,
 									   CompareType cmptype, bool nulls_first);
 extern void add_paths_to_append_rel(PlannerInfo *root, RelOptInfo *rel,
 									List *live_childrels);
-extern void try_generate_append_or_path(PlannerInfo *root, RelOptInfo *rel,
-										List *orpaths);
 #endif							/* PATHS_H */

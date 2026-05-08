@@ -1547,6 +1547,11 @@ append_startup_cost_compare(const ListCell *a, const ListCell *b)
 	return bms_compare(path1->parent->relids, path2->parent->relids);
 }
 
+/*
+ * create_merge_append_path
+ *	  Creates a path corresponding to a MergeAppend plan, returning the
+ *	  pathnode.
+ */
 MergeAppendPath *
 create_merge_append_path(PlannerInfo *root,
 						 RelOptInfo *rel,
@@ -1554,25 +1559,6 @@ create_merge_append_path(PlannerInfo *root,
 						 List *child_append_relid_sets,
 						 List *pathkeys,
 						 Relids required_outer)
-{
-	return create_merge_append_path_ext(root, rel, subpaths,
-										child_append_relid_sets,
-										pathkeys, required_outer, -1);
-}
-
-/*
- * create_merge_append_path_ext
- *	  Creates a path corresponding to a MergeAppend plan, returning the
- *	  pathnode.  When selectivity >= 0, corrects subpath row estimates.
- */
-MergeAppendPath *
-create_merge_append_path_ext(PlannerInfo *root,
-							 RelOptInfo *rel,
-							 List *subpaths,
-							 List *child_append_relid_sets,
-							 List *pathkeys,
-							 Relids required_outer,
-							 double selectivity)
 {
 	MergeAppendPath *pathnode = makeNode(MergeAppendPath);
 	int			input_disabled_nodes;
@@ -1626,28 +1612,6 @@ create_merge_append_path_ext(PlannerInfo *root,
 		pathnode->path.rows += subpath->rows;
 		pathnode->path.parallel_safe = pathnode->path.parallel_safe &&
 			subpath->parallel_safe;
-
-		/*
-		 * We correct the cardinality in the subplan node only
-		 * for the AppendOrPath node, as was done in the bitmapscan node
-		 * (for more information, see the cost_bitmap_and_node function).
-		 * We don't do this for the partition table because
-		 * the function doesn't work with it.
-		*/
-		if (selectivity >= 0.0)
-		{
-			double subrows = clamp_row_est(selectivity * rel->tuples);
-
-			/* Parent relation must match for non-partitioned append */
-			Assert(pathnode->path.parent->relid == subpath->parent->relid ||
-				   !IsA(subpath, IndexPath));
-
-			/* Is it possible to get a parameterized node? */
-			if (subpath->param_info)
-				subpath->param_info->ppi_rows = subrows;
-			else
-				subpath->rows =	subrows;
-		}
 
 		if (!pathkeys_count_contained_in(pathkeys, subpath->pathkeys,
 										 &presorted_keys))

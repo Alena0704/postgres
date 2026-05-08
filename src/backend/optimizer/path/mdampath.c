@@ -259,8 +259,8 @@ mdam_transform_predicates(MdamContext *ctx)
 /*
  * try_mdam_for_index
  *		Process one index: run the predicate transformation pipeline,
- *		then build IndexPath/Append/MergeAppend paths.  Adds discovered
- *		paths to rel->pathlist via add_path().
+ *		then build IndexPath / Append paths.  Adds discovered paths to
+ *		rel->pathlist via add_path().
  *
  * 'or_rinfos' is the list of MDAM-candidate OR RestrictInfos collected
  * by the caller (used for IndexClause attribution).
@@ -323,7 +323,7 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 		return;
 	}
 
-	/* Multi-retrieval: check ordering, build Append/MergeAppend */
+	/* Multi-retrieval: check ordering, then build Append paths */
 	if (mdam_detect_ordering_conflict(ctx, retrievals))
 	{
 		MemoryContextSwitchTo(old_mcxt);
@@ -333,10 +333,10 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 
 	MemoryContextSwitchTo(old_mcxt);
 
-	/* Forward Append/MergeAppend */
+	/* Forward Append */
 	mdam_build_append_path(ctx, retrievals, or_rinfos, ForwardScanDirection);
 
-	/* Backward Append/MergeAppend, if useful */
+	/* Backward Append, if useful */
 	bwd_pathkeys = build_index_pathkeys(root, index, BackwardScanDirection);
 	if (bwd_pathkeys != NIL)
 		mdam_build_append_path(ctx, retrievals, or_rinfos,
@@ -3238,21 +3238,13 @@ mdam_build_append_path(MdamContext *ctx, List *retrievals, List *or_rinfos,
 	add_path(rel, (Path *) appendpath);
 
 	/*
-	 * Also build a MergeAppend path.  While the plain Append above already
-	 * preserves ordering (because MDAM guarantees key-space order), the
-	 * MergeAppend gives the optimizer an alternative with different cost
-	 * characteristics — particularly useful with LIMIT.
+	 * No MergeAppend path is built.  MDAM retrievals are produced in
+	 * non-overlapping key-space order, so a plain Append already presents
+	 * them in the correct order without any per-tuple heap-merge overhead.
+	 *
+	 * MergeAppend would only help in the "Matthias scenario" — when leading
+	 * index columns are equality-constrained and the query orders by a
+	 * suffix.  Exploiting that requires stripping equality columns from
+	 * the supplied pathkeys (see MDAM_COST.md §4); not done here.
 	 */
-	if (pathkeys != NIL && list_length(subpaths) > 1)
-	{
-		MergeAppendPath *mpath;
-
-		mpath = create_merge_append_path_ext(root, rel,
-											 subpaths,
-											 NIL,
-											 pathkeys,
-											 NULL,
-											 -1);
-		add_path(rel, (Path *) mpath);
-	}
 }
