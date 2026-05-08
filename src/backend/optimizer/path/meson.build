@@ -2,12 +2,14 @@
 
 backend_sources += files(
   'allpaths.c',
+  'appendorpath.c',
   'clausesel.c',
   'costsize.c',
   'equivclass.c',
   'indxpath.c',
   'joinpath.c',
   'joinrels.c',
+  'mdampath.c',
   'pathkeys.c',
   'tidpath.c',
 )

@@ -127,6 +127,13 @@ make_plain_restrictinfo(PlannerInfo *root,
 	restrictinfo->outer_relids = outer_relids;
 
 	/*
+	 * Cheap structural check: is this potentially an MDAM-shaped predicate?
+	 * Looked up later by mdampath.c to skip non-OR / non-comparison rinfos
+	 * without re-walking their expression trees.
+	 */
+	restrictinfo->mdam_candidate = expr_is_mdam_candidate(clause);
+
+	/*
 	 * If it's potentially delayable by lower-level security quals, figure out
 	 * whether it's leakproof.  We can skip testing this for level-zero quals,
 	 * since they would never get delayed on security grounds anyway.

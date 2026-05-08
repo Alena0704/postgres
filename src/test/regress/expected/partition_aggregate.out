@@ -842,9 +842,9 @@ SELECT a.x, a.y, count(*) FROM (SELECT * FROM pagg_tab1 WHERE x = 1 AND x = 2) a
                   QUERY PLAN                  
 ----------------------------------------------
  GroupAggregate
-   Group Key: pagg_tab1.y
+   Group Key: pagg_tab1.x, pagg_tab1.y
    ->  Sort
-         Sort Key: pagg_tab1.y
+         Sort Key: pagg_tab1.x, pagg_tab1.y
          ->  Result
                Replaces: Join on b, pagg_tab1
                One-Time Filter: false

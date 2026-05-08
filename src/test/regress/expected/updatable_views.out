@@ -555,7 +555,7 @@ EXPLAIN (costs off) UPDATE rw_view1 SET a=6 WHERE a=5;
 --------------------------------------------------
  Update on base_tbl
    ->  Index Scan using base_tbl_pkey on base_tbl
-         Index Cond: ((a > 0) AND (a = 5))
+         Index Cond: (a = 5)
 (3 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view1 WHERE a=5;
@@ -563,7 +563,7 @@ EXPLAIN (costs off) DELETE FROM rw_view1 WHERE a=5;
 --------------------------------------------------
  Delete on base_tbl
    ->  Index Scan using base_tbl_pkey on base_tbl
-         Index Cond: ((a > 0) AND (a = 5))
+         Index Cond: (a = 5)
 (3 rows)
 
 EXPLAIN (costs off)
@@ -752,19 +752,19 @@ SELECT * FROM rw_view2 ORDER BY aaa;
 (3 rows)
 
 EXPLAIN (costs off) UPDATE rw_view2 SET aaa=5 WHERE aaa=4;
-                       QUERY PLAN                       
---------------------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Update on base_tbl
    ->  Index Scan using base_tbl_pkey on base_tbl
-         Index Cond: ((a < 10) AND (a > 0) AND (a = 4))
+         Index Cond: (a = 4)
 (3 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view2 WHERE aaa=4;
-                       QUERY PLAN                       
---------------------------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Delete on base_tbl
    ->  Index Scan using base_tbl_pkey on base_tbl
-         Index Cond: ((a < 10) AND (a > 0) AND (a = 4))
+         Index Cond: (a = 4)
 (3 rows)
 
 DROP TABLE base_tbl CASCADE;
@@ -957,14 +957,14 @@ MERGE INTO rw_view2 t USING (VALUES (3, 'Row 3')) AS v(a,b) ON t.a = v.a
 ERROR:  cannot execute MERGE on relation "rw_view1"
 DETAIL:  MERGE is not supported for relations with rules.
 EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Update on base_tbl
    ->  Nested Loop
          ->  Index Scan using base_tbl_pkey on base_tbl
                Index Cond: (a = 2)
          ->  Subquery Scan on rw_view1
-               Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
+               Filter: (rw_view1.a = 2)
                ->  Bitmap Heap Scan on base_tbl base_tbl_1
                      Recheck Cond: (a > 0)
                      ->  Bitmap Index Scan on base_tbl_pkey
@@ -972,14 +972,14 @@ EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
 (10 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
-                           QUERY PLAN                           
-----------------------------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Delete on base_tbl
    ->  Nested Loop
          ->  Index Scan using base_tbl_pkey on base_tbl
                Index Cond: (a = 2)
          ->  Subquery Scan on rw_view1
-               Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
+               Filter: (rw_view1.a = 2)
                ->  Bitmap Heap Scan on base_tbl base_tbl_1
                      Recheck Cond: (a > 0)
                      ->  Bitmap Index Scan on base_tbl_pkey
@@ -1251,11 +1251,11 @@ SELECT * FROM base_tbl ORDER BY a;
 (6 rows)
 
 EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Update on rw_view1 rw_view1_1
    ->  Subquery Scan on rw_view1
-         Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
+         Filter: (rw_view1.a = 2)
          ->  Bitmap Heap Scan on base_tbl
                Recheck Cond: (a > 0)
                ->  Bitmap Index Scan on base_tbl_pkey
@@ -1263,11 +1263,11 @@ EXPLAIN (costs off) UPDATE rw_view2 SET a=3 WHERE a=2;
 (7 rows)
 
 EXPLAIN (costs off) DELETE FROM rw_view2 WHERE a=2;
-                        QUERY PLAN                        
-----------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Delete on rw_view1 rw_view1_1
    ->  Subquery Scan on rw_view1
-         Filter: ((rw_view1.a < 10) AND (rw_view1.a = 2))
+         Filter: (rw_view1.a = 2)
          ->  Bitmap Heap Scan on base_tbl
                Recheck Cond: (a > 0)
                ->  Bitmap Index Scan on base_tbl_pkey

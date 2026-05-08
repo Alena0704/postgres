@@ -127,6 +127,7 @@ extern void extract_query_dependencies(Node *query,
 
 extern Node *negate_clause(Node *node);
 extern Expr *canonicalize_qual(Expr *qual, bool is_check);
+extern bool expr_is_mdam_candidate(Expr *expr);
 
 /* in util/clauses.c: */
 
