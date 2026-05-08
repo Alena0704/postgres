@@ -377,6 +377,41 @@ WHERE (a = 5 AND c = 10) OR (a = 10 AND b = 20)
 ORDER BY a DESC, b DESC, c DESC, d DESC;
 
 --
+-- Plan-shape regression tests for cost-driven Append vs MergeAppend choice
+--
+-- MDAM produces non-overlapping retrievals in index key-space order.
+--   * ORDER BY by leading index columns => plain Append is sufficient
+--     (retrievals are already in keyspace order, free ordering).
+--   * ORDER BY by trailing columns      => MergeAppend gives N-way merge
+--     of pre-sorted streams; planner compares its heap-merge overhead
+--     (cpu_operator_cost * N * log2(N)) against Sort-on-top-of-Append.
+--   * ORDER BY ... DESC                 => backward Append (subpaths
+--     rebuilt with BackwardScanDirection, list reversed).
+--
+-- We rely on cost_append / cost_merge_append already in costsize.c to
+-- pick the right shape; these tests just lock in the expected outcome.
+--
+
+-- Plain Append for ORDER BY by leading columns
+EXPLAIN (COSTS OFF)
+SELECT * FROM mdam_test_tbl
+WHERE (a = 5 AND b = 10) OR (a = 10 AND c = 5)
+ORDER BY a, b, c, d;
+
+-- Backward Append for ORDER BY DESC by leading columns
+EXPLAIN (COSTS OFF)
+SELECT * FROM mdam_test_tbl
+WHERE (a = 5 AND b = 10) OR (a = 10 AND c = 5)
+ORDER BY a DESC;
+
+-- Sort over Append for ORDER BY by a non-leading column
+-- (MergeAppend's heap overhead at N=2 typically loses to Sort here)
+EXPLAIN (COSTS OFF)
+SELECT * FROM mdam_test_tbl
+WHERE (a = 5 AND b = 10) OR (a = 10 AND c = 5)
+ORDER BY b;
+
+--
 -- Fuzz-derived regression tests
 --
 -- The following tests are condensed reproducers for bugs found by
