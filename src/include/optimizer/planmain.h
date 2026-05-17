@@ -25,6 +25,12 @@ extern PGDLLIMPORT bool enable_self_join_elimination;
 /* query_planner callback to compute query_pathkeys */
 typedef void (*query_pathkeys_callback) (PlannerInfo *root, void *extra);
 
+
+/* Hook for plugins to get control in ExecutorRun() */
+typedef void (*create_plan_hook_type) (PlannerInfo *root,
+									   Path *best_path,
+									   Plan **plan);
+extern PGDLLIMPORT create_plan_hook_type create_plan_hook;
 /*
  * prototypes for plan/planmain.c
  */

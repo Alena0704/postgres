@@ -30,6 +30,7 @@
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/cost.h"
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteHandler.h"
@@ -57,6 +58,12 @@ explain_get_index_name_hook_type explain_get_index_name_hook = NULL;
 /* per-plan and per-node hooks for plugins to print additional info */
 explain_per_plan_hook_type explain_per_plan_hook = NULL;
 explain_per_node_hook_type explain_per_node_hook = NULL;
+
+/* Hook for plugins to get control in ExplainOnePlan() (used by AQO) */
+ExplainOnePlan_hook_type ExplainOnePlan_hook = NULL;
+
+/* Hook for plugins to get control in ExplainNode() (used by AQO) */
+ExplainOneNode_hook_type ExplainOneNode_hook = NULL;
 
 /*
  * Various places within need to convert bytes to kilobytes.  Round these up
@@ -685,6 +692,10 @@ ExplainOnePlan(PlannedStmt *plannedstmt, IntoClause *into, ExplainState *es,
 	if (es->summary && es->analyze)
 		ExplainPropertyFloat("Execution Time", "ms", 1000.0 * totaltime, 3,
 							 es);
+
+	if (ExplainOnePlan_hook)
+		ExplainOnePlan_hook(plannedstmt, into, es,
+							queryString, params, planduration, queryEnv);
 
 	ExplainCloseGroup("Query", NULL, true, es);
 }
@@ -1884,6 +1895,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			ExplainPropertyFloat("Actual Loops", NULL, 0.0, 0, es);
 		}
 	}
+
+	if (ExplainOneNode_hook)
+		ExplainOneNode_hook(es, planstate, plan);
 
 	/* in text format, first line ends here */
 	if (es->format == EXPLAIN_FORMAT_TEXT)

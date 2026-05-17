@@ -1218,6 +1218,16 @@ typedef struct RelOptInfo
 	/* extension state */
 	void	  **extension_state pg_node_attr(read_write_ignore);
 	int			extension_state_allocated;
+
+	/* For Adaptive optimization DEBUG purposes */
+	double		predicted_cardinality;
+	int			fss_hash;
+
+	/*
+	 * At this list an extension can add additional nodes to pass an info along
+	 * the planning and executing stages.
+	 */
+	List	   *ext_nodes;
 } RelOptInfo;
 
 /*
@@ -1925,6 +1935,10 @@ typedef struct ParamPathInfo
 	Cardinality ppi_rows;		/* estimated number of result tuples */
 	List	   *ppi_clauses;	/* join clauses available from outer rels */
 	Bitmapset  *ppi_serials;	/* set of rinfo_serial for enforced quals */
+
+	/* AQO DEBUG purposes */
+	double		predicted_ppi_rows;
+	double		fss_ppi_hash;
 } ParamPathInfo;
 
 

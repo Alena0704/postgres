@@ -47,6 +47,10 @@ typedef void (*joinrel_setup_hook_type) (PlannerInfo *root,
 										 List *restrictlist);
 extern PGDLLIMPORT joinrel_setup_hook_type joinrel_setup_hook;
 
+typedef void (*set_parampathinfo_postinit_hook_type) (ParamPathInfo *ppi);
+
+extern PGDLLIMPORT set_parampathinfo_postinit_hook_type parampathinfo_postinit_hook;
+
 /*
  * prototypes for pathnode.c
  */

@@ -156,6 +156,13 @@ typedef bool (*get_index_stats_hook_type) (PlannerInfo *root,
 										   AttrNumber indexattnum,
 										   VariableStatData *vardata);
 extern PGDLLIMPORT get_index_stats_hook_type get_index_stats_hook;
+typedef double (*estimate_num_groups_hook_type) (PlannerInfo *root,
+												 List *groupExprs,
+												 Path *subpath,
+												 RelOptInfo *grouped_rel,
+												 List **pgset,
+												 EstimationInfo *estinfo);
+extern PGDLLIMPORT estimate_num_groups_hook_type estimate_num_groups_hook;
 
 /* Functions in selfuncs.c */
 
@@ -223,6 +230,9 @@ extern void mergejoinscansel(PlannerInfo *root, Node *clause,
 							 Selectivity *leftstart, Selectivity *leftend,
 							 Selectivity *rightstart, Selectivity *rightend);
 
+extern double estimate_num_groups_ext(PlannerInfo *root, List *groupExprs,
+									  Path *subpath, RelOptInfo *grouped_rel,
+									  List **pgset, EstimationInfo *estinfo);
 extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 								  double input_rows, List **pgset,
 								  EstimationInfo *estinfo);

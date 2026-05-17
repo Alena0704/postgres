@@ -311,6 +311,7 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->all_partrels = NULL;
 	rel->partexprs = NULL;
 	rel->nullable_partexprs = NULL;
+	rel->ext_nodes = NULL;
 
 	/*
 	 * Pass assorted information down the inheritance hierarchy.
@@ -552,7 +553,6 @@ find_base_rel(PlannerInfo *root, int relid)
 		if (rel)
 			return rel;
 	}
-
 	elog(ERROR, "no relation entry for relid %d", relid);
 
 	return NULL;				/* keep compiler quiet */
@@ -903,6 +903,7 @@ build_join_rel(PlannerInfo *root,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+	joinrel->ext_nodes = NULL;
 
 	/* Compute information relevant to the foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
@@ -1101,6 +1102,7 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+	joinrel->ext_nodes = NULL;
 
 	/* Compute information relevant to foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
@@ -1689,6 +1691,7 @@ find_childrel_parents(PlannerInfo *root, RelOptInfo *rel)
 }
 
 
+set_parampathinfo_postinit_hook_type parampathinfo_postinit_hook = NULL;
 /*
  * get_baserel_parampathinfo
  *		Get the ParamPathInfo for a parameterized path for a base relation,
@@ -1781,6 +1784,10 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 	ppi->ppi_rows = rows;
 	ppi->ppi_clauses = pclauses;
 	ppi->ppi_serials = pserials;
+
+	if (parampathinfo_postinit_hook)
+		(*parampathinfo_postinit_hook)(ppi);
+
 	baserel->ppilist = lappend(baserel->ppilist, ppi);
 
 	return ppi;
@@ -2035,6 +2042,10 @@ get_appendrel_parampathinfo(RelOptInfo *appendrel, Relids required_outer)
 	ppi->ppi_rows = 0;
 	ppi->ppi_clauses = NIL;
 	ppi->ppi_serials = NULL;
+
+	if (parampathinfo_postinit_hook)
+		(*parampathinfo_postinit_hook)(ppi);
+
 	appendrel->ppilist = lappend(appendrel->ppilist, ppi);
 
 	return ppi;
