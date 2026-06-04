@@ -1,0 +1,4 @@
+comment = 'Trace how the standard planner (DP / GEQO) forms a join plan'
+default_version = '1.0'
+module_pathname = '$libdir/plan_trace'
+relocatable = true

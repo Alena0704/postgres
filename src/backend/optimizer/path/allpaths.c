@@ -91,6 +91,9 @@ set_rel_pathlist_hook_type set_rel_pathlist_hook = NULL;
 /* Hook for plugins to replace standard_join_search() */
 join_search_hook_type join_search_hook = NULL;
 
+/* Hook for plugins to trace plan formation (DP and GEQO); see paths.h. */
+join_rel_trace_hook_type join_rel_trace_hook = NULL;
+
 
 static void set_base_rel_consider_startup(PlannerInfo *root);
 static void set_base_rel_sizes(PlannerInfo *root);
@@ -4018,6 +4021,10 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 
 			/* Find and save the cheapest paths for this rel */
 			set_cheapest(rel);
+
+			/* Plan-formation trace (DP): this joinrel at this level. */
+			if (join_rel_trace_hook)
+				join_rel_trace_hook(root, rel, lev, 0);
 
 			/*
 			 * Except for the topmost scan/join rel, consider generating

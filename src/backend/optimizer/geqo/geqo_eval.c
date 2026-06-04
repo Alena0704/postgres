@@ -32,6 +32,15 @@
 #include "utils/memutils.h"
 
 
+/*
+ * Sequence counter bumped once per tour evaluation (geqo_eval).  A plan-trace
+ * plugin reads it to group the joinrels built during one tour together, so it
+ * can attribute every candidate subplan to the fitness of the tour it came
+ * from (good vs bad tours).  Monotonic across a backend; consumers only compare
+ * values within a single traced query.
+ */
+int			geqo_eval_seq = 0;
+
 /* A "clump" of already-joined relations within gimme_tree */
 typedef struct
 {
@@ -62,6 +71,9 @@ geqo_eval(PlannerInfo *root, Gene *tour, int num_gene)
 	Cost		fitness;
 	int			savelength;
 	struct HTAB *savehash;
+
+	/* One tick per tour evaluation (for plan-formation tracing plugins). */
+	geqo_eval_seq++;
 
 	/*
 	 * Create a private memory context that will hold all temp storage
@@ -281,6 +293,11 @@ merge_clump(PlannerInfo *root, List *clumps, Clump *new_clump, int num_gene,
 
 				/* Find and save the cheapest paths for this joinrel */
 				set_cheapest(joinrel);
+
+				/* Plan-formation trace (GEQO): joinrel size = number of rels. */
+				if (join_rel_trace_hook)
+					join_rel_trace_hook(root, joinrel,
+										bms_num_members(joinrel->relids), 1);
 
 				/*
 				 * Except for the topmost scan/join rel, consider generating

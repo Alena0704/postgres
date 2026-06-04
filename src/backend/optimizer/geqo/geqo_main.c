@@ -51,6 +51,10 @@ double		Geqo_seed;
 /* GEQO is treated as an in-core planner extension */
 int			Geqo_planner_extension_id = -1;
 
+/* Hooks/flag for plugins tracing the genetic search; see optimizer/geqo.h. */
+geqo_gen_trace_hook_type geqo_gen_trace_hook = NULL;
+bool		geqo_tracing_final = false;
+
 static int	gimme_pool_size(int nr_rel);
 static int	gimme_number_generations(int pool_size);
 
@@ -79,6 +83,7 @@ geqo(PlannerInfo *root, int number_of_rels, List *initial_rels)
 	Chromosome *momma;
 	Chromosome *daddy;
 	Chromosome *kid;
+	Gene	   *momma_snap = NULL;	/* momma before crossover (ERX aliases kid=momma) */
 	Pool	   *pool;
 	int			pool_size,
 				number_generations;
@@ -143,6 +148,14 @@ geqo(PlannerInfo *root, int number_of_rels, List *initial_rels)
 	momma = alloc_chromo(root, pool->string_length);
 	daddy = alloc_chromo(root, pool->string_length);
 
+/*
+ * Buffer to snapshot momma's tour before recombination.  With ERX (the default)
+ * the code sets kid = momma and rewrites momma->string in place, so by the time
+ * a trace hook runs momma already equals the kid.  Snapshotting here lets the
+ * hook report what the child truly inherited from each parent.
+ */
+	momma_snap = (Gene *) palloc(pool->string_length * sizeof(Gene));
+
 #if defined (ERX)
 #ifdef GEQO_DEBUG
 	elog(DEBUG2, "using edge recombination crossover [ERX]");
@@ -194,6 +207,11 @@ geqo(PlannerInfo *root, int number_of_rels, List *initial_rels)
 		/* SELECTION: using linear bias function */
 		geqo_selection(root, momma, daddy, pool, Geqo_selection_bias);
 
+		/* Snapshot momma now, before crossover may overwrite it in place. */
+		if (geqo_gen_trace_hook)
+			memcpy(momma_snap, momma->string,
+				   pool->string_length * sizeof(Gene));
+
 #if defined (ERX)
 		/* EDGE RECOMBINATION CROSSOVER */
 		gimme_edge_table(root, momma->string, daddy->string, pool->string_length, edge_table);
@@ -231,6 +249,13 @@ geqo(PlannerInfo *root, int number_of_rels, List *initial_rels)
 
 		/* push the kid into the wilderness of life according to its worth */
 		spread_chromo(root, kid, pool);
+
+		/* Generation trace: parents, child (inherited traits), and fitness.
+		 * Use the pre-crossover momma snapshot (daddy is never overwritten). */
+		if (geqo_gen_trace_hook)
+			geqo_gen_trace_hook(root, generation, momma_snap, daddy->string,
+								kid->string, pool->string_length, kid->worth,
+								pool->data[0].worth);
 
 
 #ifdef GEQO_DEBUG
@@ -278,7 +303,10 @@ geqo(PlannerInfo *root, int number_of_rels, List *initial_rels)
 	 */
 	best_tour = (Gene *) pool->data[0].string;
 
+	/* Trace the joinrels of the *winning* tour only (not every evaluation). */
+	geqo_tracing_final = true;
 	best_rel = gimme_tree(root, best_tour, pool->string_length);
+	geqo_tracing_final = false;
 
 	if (best_rel == NULL)
 		elog(ERROR, "geqo failed to make a valid plan");

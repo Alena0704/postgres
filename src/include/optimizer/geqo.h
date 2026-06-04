@@ -98,4 +98,23 @@ extern RelOptInfo *geqo(PlannerInfo *root,
 extern Cost geqo_eval(PlannerInfo *root, Gene *tour, int num_gene);
 extern RelOptInfo *gimme_tree(PlannerInfo *root, Gene *tour, int num_gene);
 
+/*
+ * Hooks for plugins to observe the GEQO genetic search, generation by
+ * generation: the parents (momma, daddy), the recombined child (kid) -- so the
+ * child's inherited traits can be compared against the parents -- the child's
+ * fitness and the pool's current best.  geqo_tracing_final is true only while
+ * geqo() rebuilds the final winning tour, so a join_rel_trace_hook can record
+ * just that tour's joinrels (not every tour the GA evaluated).
+ */
+typedef void (*geqo_gen_trace_hook_type) (PlannerInfo *root, int generation,
+										  const Gene *momma, const Gene *daddy,
+										  const Gene *kid, int num_gene,
+										  double kid_worth, double best_worth);
+extern PGDLLIMPORT geqo_gen_trace_hook_type geqo_gen_trace_hook;
+extern PGDLLIMPORT bool geqo_tracing_final;
+
+/* Bumped once per tour evaluation; lets a trace plugin group a tour's joinrels
+ * and attribute them to that tour's fitness (good vs bad tours). */
+extern PGDLLIMPORT int geqo_eval_seq;
+
 #endif							/* GEQO_H */

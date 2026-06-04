@@ -57,6 +57,19 @@ typedef RelOptInfo *(*join_search_hook_type) (PlannerInfo *root,
 											  List *initial_rels);
 extern PGDLLIMPORT join_search_hook_type join_search_hook;
 
+/*
+ * Hook for plugins to observe how the standard join search forms the plan:
+ * called for every joinrel just after its set_cheapest(), with the DP level
+ * (or GEQO joinrel size) and the source (0 = standard_join_search/DP,
+ * 1 = GEQO).  Lets an extension record the plan-formation trace without
+ * replacing the search.
+ */
+typedef void (*join_rel_trace_hook_type) (PlannerInfo *root,
+										  RelOptInfo *joinrel,
+										  int level,
+										  int source);
+extern PGDLLIMPORT join_rel_trace_hook_type join_rel_trace_hook;
+
 
 extern RelOptInfo *make_one_rel(PlannerInfo *root, List *joinlist);
 extern RelOptInfo *standard_join_search(PlannerInfo *root, int levels_needed,
