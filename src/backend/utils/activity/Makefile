@@ -29,6 +29,7 @@ OBJS = \
 	pgstat_kind.o \
 	pgstat_lock.o \
 	pgstat_relation.o \
+	pgstat_vacuum.o \
 	pgstat_replslot.o \
 	pgstat_shmem.o \
 	pgstat_slru.o \
