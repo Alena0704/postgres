@@ -2414,7 +2414,7 @@ pg_stat_have_stats(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_vacuum_tables(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_VACUUM_TABLES_STATS_COLS 11
+#define PG_STAT_GET_VACUUM_TABLES_STATS_COLS 12
 
 	Oid			relid = PG_GETARG_OID(0);
 	PgStat_VacuumRelationCounts *extvacuum;
@@ -2448,6 +2448,7 @@ pg_stat_get_vacuum_tables(PG_FUNCTION_ARGS)
 	values[i++] = Int64GetDatum(extvacuum->table.recently_dead_tuples);
 	values[i++] = Int64GetDatum(extvacuum->table.missed_dead_pages);
 	values[i++] = Int64GetDatum(extvacuum->table.missed_dead_tuples);
+	values[i++] = Int32GetDatum(extvacuum->common.wraparound_failsafe_count);
 	values[i++] = Int64GetDatum(extvacuum->common.wal_records);
 	values[i++] = Int64GetDatum(extvacuum->common.wal_fpi);
 	snprintf(buf, sizeof buf, UINT64_FORMAT, extvacuum->common.wal_bytes);
@@ -2516,7 +2517,7 @@ pg_stat_get_vacuum_indexes(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_vacuum_database(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_VACUUM_DATABASE_STATS_COLS 5
+#define PG_STAT_GET_VACUUM_DATABASE_STATS_COLS 7
 
 	Oid			dbid = PG_GETARG_OID(0);
 	PgStat_VacuumDBCounts *extvacuum;
@@ -2540,6 +2541,8 @@ pg_stat_get_vacuum_database(PG_FUNCTION_ARGS)
 
 	values[i++] = Int32GetDatum(extvacuum->errors);
 
+	values[i++] = Int32GetDatum(extvacuum->common.wraparound_failsafe_count);
+
 	values[i++] = Int64GetDatum(extvacuum->common.wal_records);
 	values[i++] = Int64GetDatum(extvacuum->common.wal_fpi);
 	snprintf(buf, sizeof buf, UINT64_FORMAT, extvacuum->common.wal_bytes);
@@ -2547,6 +2550,7 @@ pg_stat_get_vacuum_database(PG_FUNCTION_ARGS)
 									  CStringGetDatum(buf),
 									  ObjectIdGetDatum(0),
 									  Int32GetDatum(-1));
+	values[i++] = Int32GetDatum(extvacuum->common.interrupts_count);
 	Assert(i == PG_STAT_GET_VACUUM_DATABASE_STATS_COLS);
 
 	/* Returns the record as Datum */
