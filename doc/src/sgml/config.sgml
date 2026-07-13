@@ -9169,6 +9169,10 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         This parameter is off by default.
         Only superusers and users with the appropriate <literal>SET</literal>
         privilege can change this setting.
+        The parameter can also be attached to individual databases with
+        <link linkend="sql-alterdatabase"><command>ALTER DATABASE ... SET</command></link>,
+        which restricts the collection to vacuums running in specific
+        databases.
         Individual relations can be excluded from the collection with the
         <xref linkend="reloption-vacuum-statistics-enabled"/> storage
         parameter.

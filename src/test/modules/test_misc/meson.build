@@ -26,6 +26,7 @@ tests += {
       't/015_vacuum_stats.pl',
       't/016_vacuum_stats_interrupts.pl',
       't/017_vacuum_stats_parallel.pl',
+      't/018_vacuum_stats_db_filter.pl',
     ],
     # The injection points are cluster-wide, so disable installcheck
     'runningcheck': false,
