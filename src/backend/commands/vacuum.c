@@ -714,6 +714,24 @@ vacuum(List *relations, const VacuumParams *params, BufferAccessStrategy bstrate
 }
 
 /*
+ * Should the vacuum of the given heap relation collect extended vacuum
+ * statistics?
+ *
+ * Both the track_vacuum_statistics GUC and the relation's
+ * vacuum_statistics_enabled storage parameter must allow it.  The decision is
+ * made once per vacuum for the table being vacuumed; its indexes follow the
+ * table.
+ */
+bool
+extvac_stats_rel_enabled(Relation heaprel)
+{
+	if (!pgstat_track_vacuum_statistics)
+		return false;
+
+	return RelationGetVacuumStatsEnabled(heaprel);
+}
+
+/*
  * Check if the current user has privileges to vacuum or analyze the relation.
  * If not, issue a WARNING log message and return false to let the caller
  * decide what to do with this relation.  This routine is used to decide if a

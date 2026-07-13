@@ -228,3 +228,28 @@ SELECT indexrelname,
   FROM pg_stat_vacuum_indexes WHERE relname = 'vacstat_par' ORDER BY indexrelname;
 RESET min_parallel_index_scan_size;
 DROP TABLE vacstat_par;
+
+-- per-relation filter: the vacuum_statistics_enabled storage parameter
+-- excludes individual relations from the collection even when
+-- track_vacuum_statistics is on.
+CREATE TABLE vacstat_off (id int PRIMARY KEY, v text)
+  WITH (autovacuum_enabled = off, vacuum_statistics_enabled = off);
+INSERT INTO vacstat_off SELECT g, repeat('y', 20) FROM generate_series(1, 1000) g;
+DELETE FROM vacstat_off WHERE id % 2 = 0;
+VACUUM vacstat_off;
+SELECT pg_stat_force_next_flush();
+-- no entries may appear, neither for the table nor for its index
+SELECT count(*) AS table_entries
+  FROM pg_stat_vacuum_tables WHERE relname = 'vacstat_off';
+SELECT count(*) AS index_entries
+  FROM pg_stat_vacuum_indexes WHERE relname = 'vacstat_off';
+
+-- re-enabling the storage parameter resumes the collection
+ALTER TABLE vacstat_off SET (vacuum_statistics_enabled = on);
+DELETE FROM vacstat_off WHERE id % 3 = 0;
+VACUUM vacstat_off;
+SELECT pg_stat_force_next_flush();
+SELECT pages_scanned > 0 AS pages_scanned,
+       tuples_deleted > 0 AS tuples_deleted
+  FROM pg_stat_vacuum_tables WHERE relname = 'vacstat_off';
+DROP TABLE vacstat_off;

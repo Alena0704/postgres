@@ -535,7 +535,7 @@ parallel_vacuum_end(ParallelVacuumState *pvs, IndexBulkDeleteResult **istats,
 	 * mode.  An index that was never processed keeps its zeroed slot (type
 	 * PGSTAT_EXTVAC_INVALID) and is skipped there.
 	 */
-	if (pgstat_track_vacuum_statistics && pvs->nindexes > 0)
+	if (extvac_stats_rel_enabled(pvs->heaprel) && pvs->nindexes > 0)
 		extvacstats = palloc0_array(PgStat_VacuumRelationCounts, pvs->nindexes);
 
 	/* Copy the updated statistics */
@@ -1132,6 +1132,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	IndexVacuumInfo ivinfo;
 	LVExtStatCountersIdx extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
+	bool		extvac_enabled = extvac_stats_rel_enabled(pvs->heaprel);
 
 	/*
 	 * Zero the report up front: extvac_stats_end_idx() leaves it untouched when
@@ -1147,7 +1148,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 		istat = &(indstats->istat);
 
 	/* Snapshot the resource usage before processing this index pass */
-	extvac_stats_start_idx(indrel, istat, &extVacCounters);
+	extvac_stats_start_idx(indrel, istat, &extVacCounters, extvac_enabled);
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = pvs->heaprel;
@@ -1185,7 +1186,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 	 * here (same as the istat update below).
 	 */
 	extvac_stats_end_idx(indrel, istat_res, &extVacCounters, &extVacReport);
-	if (pgstat_track_vacuum_statistics)
+	if (extvac_enabled)
 	{
 		extvac_accumulate_idx_report(&indstats->extvacstats, &extVacReport);
 		indstats->extvac_touched = true;

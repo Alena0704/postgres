@@ -1448,11 +1448,13 @@ static const char *const table_storage_parameters[] = {
 	"toast.log_autovacuum_min_duration",
 	"toast.vacuum_index_cleanup",
 	"toast.vacuum_max_eager_freeze_failure_rate",
+	"toast.vacuum_statistics_enabled",
 	"toast.vacuum_truncate",
 	"toast_tuple_target",
 	"user_catalog_table",
 	"vacuum_index_cleanup",
 	"vacuum_max_eager_freeze_failure_rate",
+	"vacuum_statistics_enabled",
 	"vacuum_truncate",
 	NULL
 };

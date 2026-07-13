@@ -328,6 +328,8 @@ typedef struct PVWorkerUsage
  */
 typedef struct LVExtStatCounters
 {
+	bool		track;			/* does this vacuum collect extended
+								 * statistics? */
 	TimestampTz starttime;
 	WalUsage	walusage;
 	BufferUsage bufusage;
@@ -463,8 +465,9 @@ extern double anl_random_fract(void);
 extern double anl_init_selection_state(int n);
 extern double anl_get_next_S(double t, int n, double *stateptr);
 
+extern bool extvac_stats_rel_enabled(Relation heaprel);
 extern void extvac_stats_start_idx(Relation rel, IndexBulkDeleteResult *stats,
-								   LVExtStatCountersIdx * counters);
+								   LVExtStatCountersIdx * counters, bool track);
 extern void extvac_stats_end_idx(Relation rel, IndexBulkDeleteResult *stats,
 								 LVExtStatCountersIdx * counters, PgStat_VacuumRelationCounts * report);
 extern void extvac_accumulate_idx_report(PgStat_VacuumRelationCounts * dst,

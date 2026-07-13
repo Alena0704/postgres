@@ -356,10 +356,22 @@ typedef struct StdRdOptions
 	 * to freeze. 0 if disabled, -1 if unspecified.
 	 */
 	double		vacuum_max_eager_freeze_failure_rate;
+	bool		vacuum_statistics_enabled;	/* enables collection of extended
+											 * vacuum statistics */
 } StdRdOptions;
 
 #define HEAP_MIN_FILLFACTOR			10
 #define HEAP_DEFAULT_FILLFACTOR		100
+
+/*
+ * RelationGetVacuumStatsEnabled
+ *		Returns whether extended vacuum statistics are collected for the
+ *		relation.  Valid for heap and TOAST relations only.
+ *		Note multiple eval of argument!
+ */
+#define RelationGetVacuumStatsEnabled(relation) \
+	((relation)->rd_options ? \
+	 ((StdRdOptions *) (relation)->rd_options)->vacuum_statistics_enabled : true)
 
 /*
  * RelationGetToastTupleTarget

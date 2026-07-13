@@ -415,6 +415,12 @@ typedef struct LVRelState
 	bool		wraparound_failsafe;	/* did this vacuum engage the
 										 * wraparound failsafe? */
 
+	bool		extvac_enabled; /* does this vacuum collect extended
+								 * statistics?  Combines the
+								 * track_vacuum_statistics GUC with the
+								 * relation's vacuum_statistics_enabled
+								 * storage parameter. */
+
 	PgStat_VacuumRelationCounts extVacReportIdx;
 
 	/*
@@ -510,14 +516,15 @@ static void restore_vacuum_error_info(LVRelState *vacrel,
  * ----------
  */
 static void
-extvac_stats_start(Relation rel, LVExtStatCounters * counters)
+extvac_stats_start(Relation rel, LVExtStatCounters * counters, bool track)
 {
 	TimestampTz starttime;
 
-	if (!pgstat_track_vacuum_statistics)
-		return;
-
 	memset(counters, 0, sizeof(LVExtStatCounters));
+
+	counters->track = track;
+	if (!track)
+		return;
 
 	starttime = GetCurrentTimestamp();
 
@@ -556,7 +563,7 @@ extvac_stats_end(Relation rel, LVExtStatCounters * counters,
 	long		secs;
 	int			usecs;
 
-	if (!pgstat_track_vacuum_statistics)
+	if (!counters->track)
 		return;
 
 	memset(report, 0, sizeof(PgStat_CommonCounts));
@@ -607,13 +614,13 @@ extvac_stats_end(Relation rel, LVExtStatCounters * counters,
 
 void
 extvac_stats_start_idx(Relation rel, IndexBulkDeleteResult *stats,
-					   LVExtStatCountersIdx * counters)
+					   LVExtStatCountersIdx * counters, bool track)
 {
-	if (!pgstat_track_vacuum_statistics)
+	/* Set initial values for common heap and index statistics */
+	extvac_stats_start(rel, &counters->common, track);
+	if (!track)
 		return;
 
-	/* Set initial values for common heap and index statistics */
-	extvac_stats_start(rel, &counters->common);
 	counters->pages_deleted = counters->tuples_removed = 0;
 
 	if (stats != NULL)
@@ -631,7 +638,7 @@ void
 extvac_stats_end_idx(Relation rel, IndexBulkDeleteResult *stats,
 					 LVExtStatCountersIdx * counters, PgStat_VacuumRelationCounts * report)
 {
-	if (!pgstat_track_vacuum_statistics)
+	if (!counters->common.track)
 		return;
 
 	memset(report, 0, sizeof(PgStat_VacuumRelationCounts));
@@ -673,7 +680,7 @@ extvac_stats_end_idx(Relation rel, IndexBulkDeleteResult *stats,
 static void
 accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCounts * extVacStats)
 {
-	if (!pgstat_track_vacuum_statistics)
+	if (!vacrel->extvac_enabled)
 		return;
 
 	/* Fill heap-specific extended stats fields */
@@ -763,7 +770,7 @@ extvac_accumulate_idx_report(PgStat_VacuumRelationCounts * dst,
 static void
 report_index_vacuum_extstats(LVRelState *vacrel)
 {
-	if (!pgstat_track_vacuum_statistics)
+	if (!vacrel->extvac_enabled)
 		return;
 
 	for (int idx = 0; idx < vacrel->nindexes; idx++)
@@ -938,6 +945,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	Size		dead_items_max_bytes = 0;
 	LVExtStatCounters extVacCounters;
 	PgStat_VacuumRelationCounts extVacReport;
+	bool		extvac_enabled = extvac_stats_rel_enabled(rel);
 
 	/* Initialize vacuum statistics */
 	memset(&extVacReport, 0, sizeof(PgStat_VacuumRelationCounts));
@@ -955,7 +963,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 		}
 	}
 
-	extvac_stats_start(rel, &extVacCounters);
+	extvac_stats_start(rel, &extVacCounters, extvac_enabled);
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
 								  RelationGetRelid(rel));
@@ -988,6 +996,7 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	vacrel->indname = NULL;
 	vacrel->phase = VACUUM_ERRCB_PHASE_UNKNOWN;
 	vacrel->verbose = verbose;
+	vacrel->extvac_enabled = extvac_enabled;
 	errcallback.callback = vacuum_error_callback;
 	errcallback.arg = vacrel;
 	errcallback.previous = error_context_stack;
@@ -1306,7 +1315,9 @@ heap_vacuum_rel(Relation rel, const VacuumParams *params,
 	 */
 	extvac_stats_end(vacrel->rel, &extVacCounters, &extVacReport.common);
 	accumulate_heap_vacuum_statistics(vacrel, &extVacReport);
-	pgstat_report_vacuum_extstats(vacrel->reloid, rel->rd_rel->relisshared, &extVacReport);
+	if (vacrel->extvac_enabled)
+		pgstat_report_vacuum_extstats(vacrel->reloid, rel->rd_rel->relisshared,
+									  &extVacReport);
 	pgstat_report_vacuum(rel,
 						 Max(vacrel->new_live_tuples, 0),
 						 vacrel->recently_dead_tuples +
@@ -2888,7 +2899,7 @@ lazy_vacuum_all_indexes(LVRelState *vacrel)
 
 		memset(&extVacReport.common, 0, sizeof(PgStat_CommonCounts));
 
-		extvac_stats_start(vacrel->rel, &counters);
+		extvac_stats_start(vacrel->rel, &counters, vacrel->extvac_enabled);
 
 		/* Outsource everything to parallel variant */
 		parallel_vacuum_bulkdel_all_indexes(vacrel->pvs, old_live_tuples,
@@ -3333,7 +3344,7 @@ lazy_cleanup_all_indexes(LVRelState *vacrel)
 
 		memset(&extVacReport.common, 0, sizeof(PgStat_CommonCounts));
 
-		extvac_stats_start(vacrel->rel, &counters);
+		extvac_stats_start(vacrel->rel, &counters, vacrel->extvac_enabled);
 
 		/* Outsource everything to parallel variant */
 		parallel_vacuum_cleanup_all_indexes(vacrel->pvs, reltuples,
@@ -3379,7 +3390,8 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	memset(&extVacReport, 0, sizeof(PgStat_VacuumRelationCounts));
 
 	/* Set initial statistics values to gather vacuum statistics for the index */
-	extvac_stats_start_idx(indrel, istat, &extVacCounters);
+	extvac_stats_start_idx(indrel, istat, &extVacCounters,
+						   vacrel->extvac_enabled);
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
@@ -3454,7 +3466,8 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	memset(&extVacReport, 0, sizeof(PgStat_VacuumRelationCounts));
 
 	/* Set initial statistics values to gather vacuum statistics for the index */
-	extvac_stats_start_idx(indrel, istat, &extVacCounters);
+	extvac_stats_start_idx(indrel, istat, &extVacCounters,
+						   vacrel->extvac_enabled);
 
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
@@ -4204,7 +4217,8 @@ vacuum_error_callback(void *arg)
 	 * record at the database level that a vacuum was interrupted.  Any error
 	 * here aborts the vacuum, so the exact phase does not matter.
 	 */
-	if (errinfo->rel != NULL && geterrlevel() == ERROR)
+	if (errinfo->extvac_enabled && errinfo->rel != NULL &&
+		geterrlevel() == ERROR)
 		pgstat_report_vacuum_error(errinfo->rel->rd_rel->relisshared);
 
 	switch (errinfo->phase)

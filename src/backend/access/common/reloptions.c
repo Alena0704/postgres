@@ -118,6 +118,15 @@ static relopt_bool boolRelOpts[] =
 	},
 	{
 		{
+			"vacuum_statistics_enabled",
+			"Enables collection of extended vacuum statistics in this relation",
+			RELOPT_KIND_HEAP | RELOPT_KIND_TOAST,
+			ShareUpdateExclusiveLock
+		},
+		true
+	},
+	{
+		{
 			"user_catalog_table",
 			"Declare a table as an additional catalog table, e.g. for the purpose of logical replication",
 			RELOPT_KIND_HEAP,
@@ -2025,7 +2034,9 @@ default_reloptions(Datum reloptions, bool validate, relopt_kind kind)
 		{"vacuum_truncate", RELOPT_TYPE_TERNARY,
 		offsetof(StdRdOptions, vacuum_truncate)},
 		{"vacuum_max_eager_freeze_failure_rate", RELOPT_TYPE_REAL,
-		offsetof(StdRdOptions, vacuum_max_eager_freeze_failure_rate)}
+		offsetof(StdRdOptions, vacuum_max_eager_freeze_failure_rate)},
+		{"vacuum_statistics_enabled", RELOPT_TYPE_BOOL,
+		offsetof(StdRdOptions, vacuum_statistics_enabled)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate, kind,

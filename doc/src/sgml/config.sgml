@@ -9169,6 +9169,9 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
         This parameter is off by default.
         Only superusers and users with the appropriate <literal>SET</literal>
         privilege can change this setting.
+        Individual relations can be excluded from the collection with the
+        <xref linkend="reloption-vacuum-statistics-enabled"/> storage
+        parameter.
        </para>
       </listitem>
      </varlistentry>
