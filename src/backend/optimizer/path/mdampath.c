@@ -128,11 +128,26 @@
  */
 #define MDAM_MAX_RETRIEVALS_HARD	(MDAM_MAX_RETRIEVALS * 16)
 
-/* Maximum number of critical points per column */
+/* Maximum number of critical points per column (overflow -> whole transform
+ * is abandoned, so this only bounds work, never correctness) */
 #define MDAM_MAX_CRITICAL_POINTS 64
 
 /* Maximum number of DNF conjuncts after conversion */
 #define MDAM_MAX_DNF_CONJUNCTS	64
+
+/*
+ * Cheap upfront complexity gate -- the primary planning-time control.
+ *
+ * Building the DNF for a deeply nested OR is itself expensive (cross-products,
+ * per-conjunct simplification), and the calibration corpus shows MDAM is
+ * essentially never chosen once a qual has more than a few dozen leaf
+ * comparisons -- yet those quals cost the most to analyse (median MDAM
+ * planning "tax" on such quals fell from ~0.8 ms to ~0.01 ms, and the worst
+ * case from >1 s to sub-millisecond, once this gate was added).  Counting
+ * leaves is O(nodes) and lets us skip the whole pipeline before paying that
+ * tax, without affecting the low-complexity quals where MDAM actually wins.
+ */
+#define MDAM_MAX_QUAL_LEAVES	48
 
 static MdamContext *mdam_init_context(PlannerInfo *root, RelOptInfo *rel,
 									 IndexOptInfo *index);
@@ -151,6 +166,7 @@ static List *mdam_expr_to_dnf(MdamContext *ctx, Expr *expr);
 static List *mdam_conjunct_from_opexpr(MdamContext *ctx, OpExpr *opexpr);
 static List *mdam_conjunct_from_saop(MdamContext *ctx,
 									 ScalarArrayOpExpr *saop);
+static List *mdam_conjunct_from_nulltest(MdamContext *ctx, NullTest *ntest);
 static List *mdam_simplify_conjunct(MdamContext *ctx, List *atoms);
 static MdamInterval *mdam_extract_interval(MdamContext *ctx, int colno,
 										   List *col_atoms);
@@ -161,8 +177,10 @@ static List *mdam_interval_to_atoms(MdamContext *ctx, int colno,
 static List *mdam_merge_interval_list(MdamContext *ctx, int colno,
 									  List *intervals);
 static List *mdam_get_critical_points(MdamContext *ctx, int colno, List *dnf);
+static bool mdam_col_has_null_constraint(int colno, List *dnf);
 static List *mdam_generate_elementary_intervals(MdamContext *ctx, int colno,
-												List *critical_points);
+												List *critical_points,
+												bool null_split);
 static List *mdam_generate_retrievals(MdamContext *ctx, List *dnf);
 static void mdam_generate_recursive(MdamContext *ctx, List *orig_dnf,
 									int col_idx, List *current_path,
@@ -279,7 +297,7 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 	/* Only B-tree indexes with multiple key columns */
 	if (index->relam != BTREE_AM_OID)
 		return;
-	if (index->nkeycolumns < 2)
+	if (index->nkeycolumns < 1)
 		return;
 	/* Skip partial indexes that don't match */
 	if (index->indpred != NIL && !index->predOK)
@@ -293,6 +311,18 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Predicate-only pipeline (steps 1-4) */
 	retrievals = mdam_transform_predicates(ctx);
+
+	/*
+	 * If any per-column limit overflowed mid-pipeline, the retrieval set may
+	 * be truncated and thus unsafe (it could miss OR arms).  Abandon MDAM for
+	 * this index; the planner falls back to its normal paths.
+	 */
+	if (ctx->overflow)
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		MemoryContextDelete(ctx->mdam_mcxt);
+		return;
+	}
 
 	if (retrievals == NIL)
 	{
@@ -345,11 +375,40 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 	/* Don't delete ctx->mdam_mcxt — built paths reference its contents */
 }
 
+/*
+ * mdam_count_leaves
+ *		Count leaf comparison nodes in an expression, stopping once the count
+ *		exceeds cap (so a pathological qual is rejected in O(cap) time).
+ */
+static int
+mdam_count_leaves(Node *node, int cap)
+{
+	if (node == NULL)
+		return 0;
+	if (IsA(node, RestrictInfo))
+		return mdam_count_leaves((Node *) ((RestrictInfo *) node)->clause, cap);
+	if (IsA(node, BoolExpr))
+	{
+		int			total = 0;
+		ListCell   *lc;
+
+		foreach(lc, ((BoolExpr *) node)->args)
+		{
+			total += mdam_count_leaves((Node *) lfirst(lc), cap);
+			if (total > cap)
+				return total;	/* early out */
+		}
+		return total;
+	}
+	return 1;					/* OpExpr / ScalarArrayOpExpr / NullTest / ... */
+}
+
 void
 generate_mdam_or_paths(PlannerInfo *root, RelOptInfo *rel)
 {
 	ListCell   *lc;
 	List	   *or_rinfos = NIL;
+	int			leaves = 0;
 
 	if (!enable_mdam)
 		return;
@@ -372,6 +431,20 @@ generate_mdam_or_paths(PlannerInfo *root, RelOptInfo *rel)
 
 	if (or_rinfos == NIL)
 		return;
+
+	/*
+	 * Complexity gate: if the candidate OR predicates together contain more
+	 * than MDAM_MAX_QUAL_LEAVES leaf comparisons, skip MDAM entirely rather
+	 * than pay the (frequently wasted) cost of building and shattering their
+	 * DNF.  Correctness is unaffected -- the planner simply uses its normal
+	 * paths.
+	 */
+	foreach(lc, or_rinfos)
+	{
+		leaves += mdam_count_leaves((Node *) lfirst(lc), MDAM_MAX_QUAL_LEAVES);
+		if (leaves > MDAM_MAX_QUAL_LEAVES)
+			return;
+	}
 
 	/* Try each index in turn */
 	foreach(lc, rel->indexlist)
@@ -491,7 +564,8 @@ mdam_make_atom(MdamContext *ctx, int colno, MdamOpType op, Datum value)
 
 	atom->colno = colno;
 	atom->op = op;
-	if (op != MDAM_OP_IS_ANYTHING)
+	if (op != MDAM_OP_IS_ANYTHING && op != MDAM_OP_IS_NULL &&
+		op != MDAM_OP_IS_NOT_NULL)
 		atom->value = mdam_copy_datum(ctx, colno, value);
 	return atom;
 }
@@ -552,6 +626,8 @@ mdam_copy_atom(MdamContext *ctx, MdamAtom *src)
 			dst->range_lo = mdam_copy_datum(ctx, src->colno, src->range_lo);
 			dst->range_hi = mdam_copy_datum(ctx, src->colno, src->range_hi);
 			break;
+		case MDAM_OP_IS_NULL:
+		case MDAM_OP_IS_NOT_NULL:
 		case MDAM_OP_IS_ANYTHING:
 			break;
 	}
@@ -744,6 +820,15 @@ mdam_expr_to_dnf(MdamContext *ctx, Expr *expr)
 	{
 		List	   *atoms = mdam_conjunct_from_saop(ctx,
 													(ScalarArrayOpExpr *) expr);
+
+		if (atoms == NIL)
+			return NIL;
+		return list_make1(atoms);
+	}
+	else if (IsA(expr, NullTest))
+	{
+		List	   *atoms = mdam_conjunct_from_nulltest(ctx,
+													   (NullTest *) expr);
 
 		if (atoms == NIL)
 			return NIL;
@@ -964,6 +1049,43 @@ mdam_conjunct_from_saop(MdamContext *ctx, ScalarArrayOpExpr *saop)
 	return NIL;
 }
 
+/*
+ * mdam_conjunct_from_nulltest
+ *		Convert a NullTest (col IS NULL / col IS NOT NULL) on an index column
+ *		to a single-element list containing one MdamAtom.
+ *		Returns NIL if the test doesn't match any index column.
+ */
+static List *
+mdam_conjunct_from_nulltest(MdamContext *ctx, NullTest *ntest)
+{
+	IndexOptInfo *index = ctx->index;
+	Node	   *arg;
+	int			colno;
+
+	/* Row-valued IS [NOT] NULL is not a per-column key constraint */
+	if (ntest->argisrow)
+		return NIL;
+
+	arg = (Node *) ntest->arg;
+	if (IsA(arg, RelabelType))
+		arg = (Node *) ((RelabelType *) arg)->arg;
+
+	for (colno = 0; colno < ctx->nkeycolumns; colno++)
+	{
+		if (!match_index_to_operand(arg, colno, index))
+			continue;
+
+		if (ntest->nulltesttype == IS_NULL)
+			return list_make1(mdam_make_atom(ctx, colno, MDAM_OP_IS_NULL,
+											 (Datum) 0));
+		else
+			return list_make1(mdam_make_atom(ctx, colno, MDAM_OP_IS_NOT_NULL,
+											 (Datum) 0));
+	}
+
+	return NIL;
+}
+
 
 /* ---------------------------------------------------
  * DNF simplification (Step 1 of the algorithm)
@@ -1005,6 +1127,8 @@ mdam_simplify_conjunct(MdamContext *ctx, List *atoms)
 		Datum	   *in_intersection = NULL;
 		int			n_in_intersection = -1; /* -1 = not yet set */
 		List	   *range_atoms = NIL;
+		int			n_is_null = 0;
+		int			n_is_not_null = 0;
 
 		if (atoms_for_col == NIL)
 			continue;
@@ -1057,10 +1181,44 @@ mdam_simplify_conjunct(MdamContext *ctx, List *atoms)
 							return NIL; /* contradiction */
 					}
 					break;
+				case MDAM_OP_IS_NULL:
+					n_is_null++;
+					break;
+				case MDAM_OP_IS_NOT_NULL:
+					n_is_not_null++;
+					break;
 				default:
 					range_atoms = lappend(range_atoms, atom);
 					break;
 			}
+		}
+
+		/*
+		 * Resolve NULL-ness constraints for this column.
+		 *
+		 * "IS NULL" is mutually exclusive with every value constraint (strict
+		 * btree operators never match NULL) and with "IS NOT NULL", so any
+		 * such combination makes the whole conjunct unsatisfiable.  A lone
+		 * "IS NOT NULL" is emitted verbatim; combined with a value constraint
+		 * it is redundant (a matched value is necessarily non-NULL), so we
+		 * drop it and let the value logic below run.
+		 */
+		if (n_is_null > 0)
+		{
+			if (n_is_not_null > 0 || n_eq > 0 || n_in_intersection >= 0 ||
+				range_atoms != NIL)
+				return NIL;		/* contradiction */
+			result = lappend(result,
+							 mdam_make_atom(ctx, i, MDAM_OP_IS_NULL, (Datum) 0));
+			continue;
+		}
+		if (n_is_not_null > 0 && n_eq == 0 && n_in_intersection < 0 &&
+			range_atoms == NIL)
+		{
+			result = lappend(result,
+							 mdam_make_atom(ctx, i, MDAM_OP_IS_NOT_NULL,
+											(Datum) 0));
+			continue;
 		}
 
 		/* Check for multiple distinct EQ values = contradiction */
@@ -1622,10 +1780,16 @@ mdam_get_critical_points(MdamContext *ctx, int colno, List *dnf)
 	}
 	n = out;
 
-	/* Safety limit */
+	/*
+	 * Safety limit.  Returning NIL here would be indistinguishable from "this
+	 * column has no critical points" and would silently leave the column
+	 * unconstrained -- dropping real value constraints and over-returning.
+	 * Flag the overflow so the top level abandons the whole transform instead.
+	 */
 	if (n > MDAM_MAX_CRITICAL_POINTS)
 	{
 		pfree(arr);
+		ctx->overflow = true;
 		return NIL;
 	}
 
@@ -1642,9 +1806,38 @@ mdam_get_critical_points(MdamContext *ctx, int colno, List *dnf)
  * Generate elementary intervals for a column from its critical points.
  * For critical points [a, b]: <a, =a, (a,b), =b, >b
  */
+/*
+ * mdam_col_has_null_constraint
+ *		True if any DNF conjunct applies an IS NULL or IS NOT NULL test to the
+ *		given column.  Used to decide whether a column with no value critical
+ *		points must still be split into non-NULL and NULL slices.
+ */
+static bool
+mdam_col_has_null_constraint(int colno, List *dnf)
+{
+	ListCell   *lc;
+
+	foreach(lc, dnf)
+	{
+		List	   *conjunct = (List *) lfirst(lc);
+		ListCell   *lc2;
+
+		foreach(lc2, conjunct)
+		{
+			MdamAtom   *atom = (MdamAtom *) lfirst(lc2);
+
+			if (atom->colno == colno &&
+				(atom->op == MDAM_OP_IS_NULL ||
+				 atom->op == MDAM_OP_IS_NOT_NULL))
+				return true;
+		}
+	}
+	return false;
+}
+
 static List *
 mdam_generate_elementary_intervals(MdamContext *ctx, int colno,
-								   List *critical_points)
+								   List *critical_points, bool null_split)
 {
 	List	   *intervals = NIL;
 	int			npts;
@@ -1654,12 +1847,28 @@ mdam_generate_elementary_intervals(MdamContext *ctx, int colno,
 
 	if (critical_points == NIL)
 	{
-		/* No critical points: single IS_ANYTHING interval */
-		MdamAtom   *atom = palloc0(sizeof(MdamAtom));
+		/*
+		 * No value critical points on this column.  If some DNF arm applies a
+		 * NULL-ness test (IS NULL / IS NOT NULL) to it, we must still split the
+		 * space into a non-NULL slice and a NULL slice so those arms are
+		 * satisfied precisely; leaving the column IS_ANYTHING would let the
+		 * scan return NULL rows for an "IS NOT NULL" arm (and vice versa).
+		 * Otherwise the column is genuinely unconstrained (IS_ANYTHING covers
+		 * every value including NULL).
+		 */
+		if (null_split)
+			return list_make2(mdam_make_atom(ctx, colno, MDAM_OP_IS_NOT_NULL,
+											 (Datum) 0),
+							  mdam_make_atom(ctx, colno, MDAM_OP_IS_NULL,
+											 (Datum) 0));
+		else
+		{
+			MdamAtom   *atom = palloc0(sizeof(MdamAtom));
 
-		atom->colno = colno;
-		atom->op = MDAM_OP_IS_ANYTHING;
-		return list_make1(atom);
+			atom->colno = colno;
+			atom->op = MDAM_OP_IS_ANYTHING;
+			return list_make1(atom);
+		}
 	}
 
 	npts = list_length(critical_points);
@@ -1692,6 +1901,24 @@ mdam_generate_elementary_intervals(MdamContext *ctx, int colno,
 						mdam_make_atom(ctx, colno, MDAM_OP_GT,
 									   pts[npts - 1]));
 
+	/*
+	 * NULL slice.  The scalar intervals above are all built from btree
+	 * strategy operators, which are strict: none of them matches a row whose
+	 * column value is NULL.  When a column is shattered because *other* DNF
+	 * arms constrain it, an arm that leaves this column unconstrained must
+	 * still return its NULL rows, so we add an explicit "IS NULL" elementary
+	 * interval.  Paths that pair this slice with an arm that does constrain
+	 * the column to non-null values are discarded later by
+	 * mdam_retrieval_satisfies_dnf(), so adding it unconditionally is safe.
+	 */
+	{
+		MdamAtom   *nullatom = palloc0(sizeof(MdamAtom));
+
+		nullatom->colno = colno;
+		nullatom->op = MDAM_OP_IS_NULL;
+		intervals = lappend(intervals, nullatom);
+	}
+
 	pfree(pts);
 	return intervals;
 }
@@ -1713,7 +1940,8 @@ mdam_generate_retrievals(MdamContext *ctx, List *dnf)
 		for (col = 0; col < ctx->nkeycolumns; col++)
 		{
 			List	   *cpts = mdam_get_critical_points(ctx, col, dnf);
-			List	   *eivs = mdam_generate_elementary_intervals(ctx, col, cpts);
+			List	   *eivs = mdam_generate_elementary_intervals(ctx, col, cpts,
+						mdam_col_has_null_constraint(col, dnf));
 
 			elog(DEBUG1, "MDAM: col %d: %d critical points, %d elementary intervals",
 				 col, list_length(cpts), list_length(eivs));
@@ -1771,7 +1999,8 @@ mdam_generate_recursive(MdamContext *ctx, List *orig_dnf,
 
 	critical_points = mdam_get_critical_points(ctx, col_idx, orig_dnf);
 	elem_intervals = mdam_generate_elementary_intervals(ctx, col_idx,
-														critical_points);
+														critical_points,
+														mdam_col_has_null_constraint(col_idx, orig_dnf));
 
 	foreach(lc, elem_intervals)
 	{
@@ -1864,6 +2093,32 @@ mdam_atoms_compatible(MdamContext *ctx, MdamAtom *dnf_atom,
 	if (path_atom->op == MDAM_OP_IS_ANYTHING)
 		return true;
 
+	/*
+	 * NULL slice.  A path constrained to IS NULL contains only NULL rows; a
+	 * DNF atom constrained to IS NULL matches only NULL rows.  They are
+	 * mutually compatible only when both sides agree on NULL-ness (or the DNF
+	 * side is unconstrained).  Any strict scalar operator on either side is
+	 * incompatible with the other's NULL slice.
+	 */
+	if (path_atom->op == MDAM_OP_IS_NULL || dnf_atom->op == MDAM_OP_IS_NULL)
+	{
+		if (dnf_atom->op == MDAM_OP_IS_ANYTHING ||
+			dnf_atom->op == MDAM_OP_IS_NOT_NULL)
+			return (path_atom->op != MDAM_OP_IS_NULL);
+		return (path_atom->op == MDAM_OP_IS_NULL &&
+				dnf_atom->op == MDAM_OP_IS_NULL);
+	}
+
+	/*
+	 * "IS NOT NULL" as a DNF constraint is satisfied by any non-NULL value
+	 * slice.  The NULL slice was already handled above, and IS_ANYTHING at the
+	 * top, so whatever path atom remains here is a concrete value/range and is
+	 * necessarily non-NULL.
+	 */
+	if (dnf_atom->op == MDAM_OP_IS_NOT_NULL ||
+		path_atom->op == MDAM_OP_IS_NOT_NULL)
+		return true;
+
 	/* If path is EQ, check if the point satisfies the DNF atom */
 	if (path_atom->op == MDAM_OP_EQ)
 	{
@@ -1892,6 +2147,10 @@ mdam_atoms_compatible(MdamContext *ctx, MdamAtom *dnf_atom,
 			case MDAM_OP_RANGE_EXCL:
 				return (mdam_compare(ctx, colno, point, dnf_atom->range_lo) > 0 &&
 						mdam_compare(ctx, colno, point, dnf_atom->range_hi) < 0);
+			case MDAM_OP_IS_NULL:
+				return false;	/* a scalar point is never NULL */
+			case MDAM_OP_IS_NOT_NULL:
+				return true;	/* a scalar point is always non-NULL */
 			case MDAM_OP_IS_ANYTHING:
 				return true;
 		}
@@ -1926,6 +2185,10 @@ mdam_atoms_compatible(MdamContext *ctx, MdamAtom *dnf_atom,
 			case MDAM_OP_RANGE_EXCL:
 				return (mdam_compare(ctx, colno, point, path_atom->range_lo) > 0 &&
 						mdam_compare(ctx, colno, point, path_atom->range_hi) < 0);
+			case MDAM_OP_IS_NULL:
+				return false;	/* a scalar point is never NULL */
+			case MDAM_OP_IS_NOT_NULL:
+				return true;	/* a scalar point is always non-NULL */
 			case MDAM_OP_IS_ANYTHING:
 				return true;
 		}
@@ -2114,6 +2377,46 @@ mdam_base_atoms_equal(MdamContext *ctx, List *a, List *b)
 }
 
 /*
+ * mdam_path_has_null_atom
+ *		True if any atom in the path is an IS NULL slice.
+ */
+static bool
+mdam_path_has_null_atom(List *path)
+{
+	ListCell   *lc;
+
+	foreach(lc, path)
+	{
+		MdamAtom   *a = (MdamAtom *) lfirst(lc);
+
+		if (a->op == MDAM_OP_IS_NULL)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * mdam_path_has_nullness_atom
+ *		True if the path carries any IS NULL or IS NOT NULL slice.  Such atoms
+ *		have no scalar value and are invisible to the interval machinery, so
+ *		these paths must skip interval coalescing to avoid being dropped.
+ */
+static bool
+mdam_path_has_nullness_atom(List *path)
+{
+	ListCell   *lc;
+
+	foreach(lc, path)
+	{
+		MdamAtom   *a = (MdamAtom *) lfirst(lc);
+
+		if (a->op == MDAM_OP_IS_NULL || a->op == MDAM_OP_IS_NOT_NULL)
+			return true;
+	}
+	return false;
+}
+
+/*
  * mdam_merge_retrievals
  *		Step 3: Merge retrieval paths by coalescing intervals and folding
  *		EQ values into IN lists.  Process columns in reverse index order.
@@ -2121,6 +2424,30 @@ mdam_base_atoms_equal(MdamContext *ctx, List *a, List *b)
 static List *
 mdam_merge_retrievals(MdamContext *ctx, List *paths)
 {
+	List	   *null_paths = NIL;
+	List	   *plain_paths = NIL;
+	ListCell   *plc;
+
+	/*
+	 * Paths containing an IS NULL slice bypass interval coalescing and
+	 * EQ-to-IN folding: those transforms round-trip atoms through
+	 * mdam_extract_interval(), which has no representation for the NULL
+	 * slice and would silently drop it (turning "a IS NULL AND b = 20" into
+	 * an unconstrained "b = 20" scan that wrongly returns non-NULL a rows).
+	 * NULL-slice paths are few, so keeping them verbatim costs little; step 4
+	 * re-sorts the whole set into key-space order regardless.
+	 */
+	foreach(plc, paths)
+	{
+		List	   *p = (List *) lfirst(plc);
+
+		if (mdam_path_has_nullness_atom(p))
+			null_paths = lappend(null_paths, p);
+		else
+			plain_paths = lappend(plain_paths, p);
+	}
+	paths = plain_paths;
+
 	for (int col = ctx->nkeycolumns - 1; col >= 0; col--)
 	{
 		/*
@@ -2146,6 +2473,7 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 			MdamInterval *iv;
 			ListCell   *lc2;
 			int			j;
+			bool		group_unconstrained;
 
 			if (used[i])
 			{
@@ -2158,6 +2486,17 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 
 			/* Extract interval for this path's target column */
 			col_atoms_list = mdam_atoms_for_col(path, col);
+
+			/*
+			 * Track whether any path in this group leaves the column truly
+			 * unconstrained (no atoms).  That distinguishes "column may be
+			 * NULL" (unconstrained) from "column is some value" (a union of
+			 * value slices that happens to tile the whole line): the former
+			 * must stay unconstrained, the latter is IS NOT NULL.  Both yield a
+			 * full-range interval, so the flag is the only way to tell them
+			 * apart when emitting atoms below.
+			 */
+			group_unconstrained = (col_atoms_list == NIL);
 
 			iv = mdam_extract_interval(ctx, col, col_atoms_list);
 			if (iv)
@@ -2183,6 +2522,9 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 				{
 					List	   *other_col_atoms = mdam_atoms_for_col(other, col);
 
+					if (other_col_atoms == NIL)
+						group_unconstrained = true;
+
 					iv = mdam_extract_interval(ctx, col, other_col_atoms);
 					if (iv)
 						intervals = lappend(intervals, iv);
@@ -2202,8 +2544,26 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 				foreach(lc3, merged_ivs)
 				{
 					MdamInterval *miv = (MdamInterval *) lfirst(lc3);
-					List	   *iv_atoms = mdam_interval_to_atoms(ctx, col, miv);
-					List	   *new_path = list_concat_copy(base, iv_atoms);
+					List	   *iv_atoms;
+					List	   *new_path;
+
+					if (miv->lo_infinite && miv->hi_infinite &&
+						!group_unconstrained)
+					{
+						/*
+						 * Value slices tiling the whole line collapse to a
+						 * full-range interval, but they never covered NULL.
+						 * Emit an explicit IS NOT NULL so the scan does not
+						 * silently start returning NULL rows.
+						 */
+						iv_atoms = list_make1(mdam_make_atom(ctx, col,
+															 MDAM_OP_IS_NOT_NULL,
+															 (Datum) 0));
+					}
+					else
+						iv_atoms = mdam_interval_to_atoms(ctx, col, miv);
+
+					new_path = list_concat_copy(base, iv_atoms);
 
 					coalesced = lappend(coalesced,
 										mdam_sort_path_atoms(new_path));
@@ -2225,7 +2585,8 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 		paths = mdam_merge_eq_to_in(ctx, col, paths, false);
 	}
 
-	return paths;
+	/* Re-attach the untouched NULL-slice paths. */
+	return list_concat(paths, null_paths);
 }
 
 /*
@@ -2408,7 +2769,27 @@ mdam_get_path_sort_key(MdamContext *ctx, List *path)
 	for (int i = 0; i < ctx->nkeycolumns; i++)
 	{
 		List	   *col_atoms = mdam_atoms_for_col(path, i);
-		MdamInterval *iv = mdam_extract_interval(ctx, i, col_atoms);
+		MdamInterval *iv;
+
+		/*
+		 * A NULL slice has no scalar bounds; mark it so the comparator can
+		 * place it at the column's NULLS FIRST/LAST position.
+		 */
+		if (mdam_path_has_null_atom(col_atoms))
+		{
+			key[i].is_null = true;
+			/*
+			 * Leave no finite scalar bound behind: the NULL slice has no
+			 * value, so any consumer that reads lo/hi must see them as
+			 * infinite rather than a bogus 0 Datum (which would be detoasted
+			 * as a by-reference value and crash).
+			 */
+			key[i].lo_infinite = true;
+			key[i].hi_infinite = true;
+			continue;
+		}
+
+		iv = mdam_extract_interval(ctx, i, col_atoms);
 
 		if (iv)
 			key[i] = *iv;
@@ -2438,6 +2819,22 @@ mdam_path_sort_cmp(const void *a, const void *b, void *arg)
 		const		MdamInterval *ia = &ea->key[col];
 		const		MdamInterval *ib = &eb->key[col];
 		int			cmp;
+
+		/*
+		 * NULL slice ordering.  A NULL value on this column sorts to the
+		 * position dictated by the index's NULLS FIRST/LAST attribute.  For a
+		 * backward scan the caller reverses the whole retrieval list, which
+		 * flips this into the correct descending-order position.
+		 */
+		if (ia->is_null || ib->is_null)
+		{
+			if (ia->is_null && ib->is_null)
+				continue;		/* both NULL here; disambiguate on next col */
+			if (ctx->index->nulls_first[col])
+				return ia->is_null ? -1 : 1;
+			else
+				return ia->is_null ? 1 : -1;
+		}
 
 		/* Compare lower bounds */
 		if (ia->lo_infinite && !ib->lo_infinite)
@@ -2540,7 +2937,8 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 					/* Shatter unconstrained column */
 					crit_pts = mdam_get_critical_points(ctx, col_idx, dnf);
 					elem_ivs = mdam_generate_elementary_intervals(ctx, col_idx,
-																  crit_pts);
+																  crit_pts,
+																  mdam_col_has_null_constraint(col_idx, dnf));
 
 					foreach(alc, elem_ivs)
 					{
@@ -2587,6 +2985,13 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 					/* Single EQ: keep as-is */
 					new_paths = lappend(new_paths, p);
 				}
+				else if (list_length(col_atom_list) == 1 &&
+						 (atom->op == MDAM_OP_IS_NULL ||
+						  atom->op == MDAM_OP_IS_NOT_NULL))
+				{
+					/* Single NULL-ness slice: keep as-is (point-like) */
+					new_paths = lappend(new_paths, p);
+				}
 				else
 				{
 					/*
@@ -2597,8 +3002,9 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 					bool		shattered = false;
 
 					crit_pts = mdam_get_critical_points(ctx, col_idx, dnf);
+					/* value-range column: no NULL slice (a range is non-NULL) */
 					elem_ivs = mdam_generate_elementary_intervals(ctx, col_idx,
-																  crit_pts);
+																  crit_pts, false);
 
 					foreach(alc, elem_ivs)
 					{
@@ -2607,6 +3013,14 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 						MdamInterval *iv;
 
 						if (ei->op == MDAM_OP_IS_ANYTHING)
+							continue;
+
+						/*
+						 * The NULL slice cannot intersect a value range: a
+						 * column already restricted to a scalar range is never
+						 * NULL.  Skip it (the intersection is empty).
+						 */
+						if (ei->op == MDAM_OP_IS_NULL)
 							continue;
 
 						/* Intersect ALL column atoms with this interval */
@@ -2752,8 +3166,21 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 							if (list_length(merged_ivs) == 1)
 							{
 								MdamInterval *miv = (MdamInterval *) linitial(merged_ivs);
-								List	   *new_atoms = mdam_interval_to_atoms(ctx, merge_col, miv);
-								List	   *new_path = list_concat_copy(cur_base, new_atoms);
+								bool		grp_unconstrained =
+									(cur_col_atoms == NIL || next_col_atoms == NIL);
+								List	   *new_atoms;
+								List	   *new_path;
+
+								/* full-range union of value slices is IS NOT NULL */
+								if (miv->lo_infinite && miv->hi_infinite &&
+									!grp_unconstrained)
+									new_atoms = list_make1(mdam_make_atom(ctx, merge_col,
+																		  MDAM_OP_IS_NOT_NULL,
+																		  (Datum) 0));
+								else
+									new_atoms = mdam_interval_to_atoms(ctx, merge_col, miv);
+
+								new_path = list_concat_copy(cur_base, new_atoms);
 
 								merged_paths = lappend(merged_paths, mdam_sort_path_atoms(new_path));
 								skip[i + 1] = true; /* consumed */
@@ -2833,7 +3260,11 @@ mdam_detect_ordering_conflict(MdamContext *ctx, List *paths)
 		{
 			bool		same = true;
 
-			if (ka[col].lo_infinite != kb[col].lo_infinite)
+			if (ka[col].is_null != kb[col].is_null)
+				same = false;
+			else if (ka[col].is_null && kb[col].is_null)
+				same = true;	/* both are the NULL slice on this column */
+			else if (ka[col].lo_infinite != kb[col].lo_infinite)
 				same = false;
 			else if (!ka[col].lo_infinite &&
 					 mdam_compare(ctx, col, ka[col].lo, kb[col].lo) != 0)
@@ -2855,8 +3286,8 @@ mdam_detect_ordering_conflict(MdamContext *ctx, List *paths)
 			}
 		}
 
-		if (first_diff <= 0)
-			continue;
+		if (first_diff < 0)
+			continue;			/* identical keys */
 
 		/*
 		 * Check all leading columns before first_diff for non-point
@@ -2866,13 +3297,57 @@ mdam_detect_ordering_conflict(MdamContext *ctx, List *paths)
 		{
 			bool		is_point;
 
-			is_point = (!ka[col].lo_infinite && !ka[col].hi_infinite &&
-						ka[col].lo_inclusive && ka[col].hi_inclusive &&
-						mdam_compare(ctx, col, ka[col].lo, ka[col].hi) == 0);
+			/* A NULL slice is a single point in key space. */
+			is_point = ka[col].is_null ||
+				(!ka[col].lo_infinite && !ka[col].hi_infinite &&
+				 ka[col].lo_inclusive && ka[col].hi_inclusive &&
+				 mdam_compare(ctx, col, ka[col].lo, ka[col].hi) == 0);
 
 			if (!is_point)
 			{
 				/* Ordering conflict found */
+				for (int j = 0; j < npaths; j++)
+					pfree(sort_keys[j]);
+				pfree(sort_keys);
+				return true;
+			}
+		}
+
+		/*
+		 * At first_diff the paths' key spaces must not overlap: the earlier
+		 * path (ka) must end before the later one (kb) begins.  A leading
+		 * column that is unbounded above -- most importantly the full-range
+		 * IS NOT NULL slice -- straddles the following path's value and cannot
+		 * be produced in order by a plain Append.
+		 */
+		{
+			MdamInterval *a = &ka[first_diff];
+			MdamInterval *b = &kb[first_diff];
+			bool		nf = ctx->index->nulls_first[first_diff];
+			bool		ok;
+
+			if (a->is_null || b->is_null)
+			{
+				/* the NULL slice must be the side the sort orders last */
+				if (a->is_null && b->is_null)
+					ok = true;
+				else if (a->is_null)
+					ok = nf;	/* NULL first => NULL may precede a value */
+				else
+					ok = !nf;	/* NULLS LAST => value precedes NULL */
+			}
+			else if (a->hi_infinite || b->lo_infinite)
+				ok = false;		/* a runs to +inf (or b from -inf): overlap */
+			else
+			{
+				int			c = mdam_compare(ctx, first_diff, a->hi, b->lo);
+
+				ok = (c < 0) ||
+					(c == 0 && !(a->hi_inclusive && b->lo_inclusive));
+			}
+
+			if (!ok)
+			{
 				for (int j = 0; j < npaths; j++)
 					pfree(sort_keys[j]);
 				pfree(sort_keys);
@@ -3042,6 +3517,19 @@ mdam_atom_to_expr(MdamContext *ctx, MdamAtom *atom)
 										InvalidOid, cc->collid);
 
 				return makeBoolExpr(AND_EXPR, list_make2(gt_expr, lt_expr), -1);
+			}
+
+		case MDAM_OP_IS_NULL:
+		case MDAM_OP_IS_NOT_NULL:
+			{
+				NullTest   *nt = makeNode(NullTest);
+
+				nt->arg = (Expr *) indexvar;
+				nt->nulltesttype = (atom->op == MDAM_OP_IS_NULL) ?
+					IS_NULL : IS_NOT_NULL;
+				nt->argisrow = false;
+				nt->location = -1;
+				return (Expr *) nt;
 			}
 
 		case MDAM_OP_IS_ANYTHING:
