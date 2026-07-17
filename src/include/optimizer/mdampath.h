@@ -29,6 +29,8 @@ typedef enum MdamOpType
 	MDAM_OP_GE,					/* column >= value */
 	MDAM_OP_SAOP,				/* column IN (v1, v2, ...) */
 	MDAM_OP_RANGE_EXCL,			/* low < column < high (exclusive both ends) */
+	MDAM_OP_IS_NULL,			/* column IS NULL */
+	MDAM_OP_IS_NOT_NULL,		/* column IS NOT NULL */
 	MDAM_OP_IS_ANYTHING			/* column is unconstrained */
 } MdamOpType;
 
@@ -57,6 +59,7 @@ typedef struct MdamInterval
 	bool		hi_inclusive;
 	bool		lo_infinite;	/* no lower bound (-inf bound)? */
 	bool		hi_infinite;	/* no upper bound (+inf bound)? */
+	bool		is_null;		/* this "interval" is the NULL slice */
 } MdamInterval;
 
 /*
@@ -86,6 +89,9 @@ typedef struct MdamContext
 	int			nkeycolumns;
 	MdamColContext *col_ctx;	/* array[nkeycolumns] */
 	MemoryContext mdam_mcxt;	/* scratch memory context */
+	bool		overflow;		/* a per-column limit was exceeded: the
+								 * retrieval set would be truncated, so the
+								 * whole transform must be abandoned */
 } MdamContext;
 
 extern void generate_mdam_or_paths(PlannerInfo *root, RelOptInfo *rel);
