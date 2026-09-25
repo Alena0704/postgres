@@ -245,4 +245,22 @@ SELECT x FROM inequality_simplification_tab WHERE ((x > 1 AND x < 4) OR (x < 2 A
 -- (1,6) union (8,inf): 2,3,4,5,9,10,15
 SELECT x FROM inequality_simplification_tab WHERE ((x > 1 AND x < 6) OR (x > 8)) ORDER BY x;
 
+-- An OR covering every non-NULL value is "x IS NOT NULL", not TRUE: the
+-- NULL row must not come back (NOT BETWEEN with an empty range is pushed
+-- down to such an OR before canonicalize_qual sees it).
+INSERT INTO inequality_simplification_tab VALUES (NULL, NULL);
+EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
+  WHERE NOT (x BETWEEN 10 AND 1);
+SELECT count(*) FROM inequality_simplification_tab WHERE NOT (x BETWEEN 10 AND 1);
+SELECT count(*) FROM inequality_simplification_tab WHERE x < 10 OR x >= 3;
+SELECT count(*) FROM inequality_simplification_tab WHERE x <> 5 OR x = 5;
+SELECT count(*) FROM inequality_simplification_tab WHERE x IS NOT NULL;
+-- the generated IS NOT NULL is dropped when another arm is strict in x
+EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
+  WHERE x NOT BETWEEN SYMMETRIC 3 AND 8;
+-- NULL on the nullable side of an outer join
+SELECT count(*) FROM inequality_simplification_tab a
+  LEFT JOIN inequality_simplification_tab b ON false
+  WHERE NOT (b.x BETWEEN 10 AND 1);
+
 DROP TABLE inequality_simplification_tab;

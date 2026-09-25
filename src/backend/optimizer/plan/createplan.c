@@ -1405,9 +1405,10 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	/*
 	 * If any quals exist, they may be useful to perform further partition
 	 * pruning during execution.  Gather information needed by the executor to
-	 * do partition pruning.
+	 * do partition pruning.  An MDAM Append scans a single relation, so
+	 * there is nothing to prune.
 	 */
-	if (enable_partition_pruning)
+	if (enable_partition_pruning && !best_path->is_mdam)
 	{
 		List	   *prunequal;
 

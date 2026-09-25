@@ -2241,12 +2241,16 @@ get_cheapest_parameterized_child_path(PlannerInfo *root, RelOptInfo *rel,
  * children to subpaths and the rest to special_subpaths.  If the latter is
  * NULL, we don't flatten the path at all (unless it contains only partial
  * paths).
+ *
+ * An MDAM Append is never flattened: all of its children are scans of the
+ * same relation, and pulling them up would give the parent Append several
+ * subpaths with the same parent rel, which partition pruning cannot map.
  */
 static void
 accumulate_append_subpath(Path *path, List **subpaths, List **special_subpaths,
 						  List **child_append_relid_sets)
 {
-	if (IsA(path, AppendPath))
+	if (IsA(path, AppendPath) && !((AppendPath *) path)->is_mdam)
 	{
 		AppendPath *apath = (AppendPath *) path;
 

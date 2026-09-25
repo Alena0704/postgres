@@ -168,6 +168,7 @@ static List *mdam_conjunct_from_saop(MdamContext *ctx,
 									 ScalarArrayOpExpr *saop);
 static List *mdam_conjunct_from_nulltest(MdamContext *ctx, NullTest *ntest);
 static List *mdam_simplify_conjunct(MdamContext *ctx, List *atoms);
+static bool mdam_col_atoms_exact(List *col_atoms);
 static MdamInterval *mdam_extract_interval(MdamContext *ctx, int colno,
 										   List *col_atoms);
 static bool mdam_point_in_interval(MdamContext *ctx, int colno,
@@ -200,7 +201,7 @@ static int mdam_last_constrained_col(List *path);
 static MdamInterval *mdam_get_path_sort_key(MdamContext *ctx, List *path);
 static int	mdam_path_sort_cmp(const void *a, const void *b, void *arg);
 static List *mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf,
-									   List *paths);
+									   List *paths, List **presorted);
 static bool mdam_detect_ordering_conflict(MdamContext *ctx, List *paths);
 static Expr *mdam_atom_to_expr(MdamContext *ctx, MdamAtom *atom);
 static IndexPath *mdam_build_index_path(MdamContext *ctx,
@@ -247,12 +248,14 @@ typedef struct MdamSortEntry
  * for the returned list and atoms live there.
  */
 static List *
-mdam_transform_predicates(MdamContext *ctx)
+mdam_transform_predicates(MdamContext *ctx, List **presorted)
 {
 	List	   *dnf;
 	List	   *initial_retrievals;
 	List	   *merged;
 	List	   *final_paths;
+
+	*presorted = NIL;
 
 	/* Step 1: DNF + simplify */
 	dnf = mdam_extract_dnf(ctx, ctx->rel->baserestrictinfo);
@@ -269,7 +272,7 @@ mdam_transform_predicates(MdamContext *ctx)
 	merged = mdam_merge_retrievals(ctx, initial_retrievals);
 
 	/* Step 4: expand leading constraints, sort by key space, coalesce */
-	final_paths = mdam_expand_sort_coalesce(ctx, dnf, merged);
+	final_paths = mdam_expand_sort_coalesce(ctx, dnf, merged, presorted);
 
 	return final_paths;
 }
@@ -290,6 +293,7 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 	MdamContext *ctx;
 	MemoryContext old_mcxt;
 	List	   *retrievals;
+	List	   *presorted;
 	List	   *bwd_pathkeys;
 
 	check_stack_depth();
@@ -310,7 +314,7 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 	old_mcxt = MemoryContextSwitchTo(ctx->mdam_mcxt);
 
 	/* Predicate-only pipeline (steps 1-4) */
-	retrievals = mdam_transform_predicates(ctx);
+	retrievals = mdam_transform_predicates(ctx, &presorted);
 
 	/*
 	 * If any per-column limit overflowed mid-pipeline, the retrieval set may
@@ -356,9 +360,31 @@ try_mdam_for_index(PlannerInfo *root, RelOptInfo *rel,
 	/* Multi-retrieval: check ordering, then build Append paths */
 	if (mdam_detect_ordering_conflict(ctx, retrievals))
 	{
-		MemoryContextSwitchTo(old_mcxt);
-		MemoryContextDelete(ctx->mdam_mcxt);
-		return;
+		/*
+		 * Step 4c merges adjacent paths whenever their key spaces are
+		 * contiguous on one column, but a merge on a *leading* column can
+		 * swallow key space that a later path occupies -- e.g. coalescing
+		 * (a < 6, b = 12) with (a = 6, b = 12) into (a <= 6, b = 12) puts
+		 * (a = 6, b IS NULL) inside the first path's span, and no plain
+		 * Append can then emit rows in key order.
+		 *
+		 * The finer pre-coalesce set covers identical key space and is often
+		 * still ordered, so retry with it rather than abandoning MDAM.  The
+		 * only cost is a wider Append.
+		 */
+		if (list_length(presorted) > list_length(retrievals) &&
+			!mdam_detect_ordering_conflict(ctx, presorted))
+		{
+			elog(DEBUG1, "MDAM: coalesce broke ordering, using %d pre-coalesce retrievals",
+				 list_length(presorted));
+			retrievals = presorted;
+		}
+		else
+		{
+			MemoryContextSwitchTo(old_mcxt);
+			MemoryContextDelete(ctx->mdam_mcxt);
+			return;
+		}
 	}
 
 	MemoryContextSwitchTo(old_mcxt);
@@ -1344,6 +1370,33 @@ mdam_simplify_conjunct(MdamContext *ctx, List *atoms)
  * Section 5: Interval arithmetic
  * ================================================================
  */
+
+/*
+ * mdam_col_atoms_exact
+ *		True when mdam_extract_interval() can represent this column's ANDed
+ *		atoms exactly, rather than having to widen them.
+ */
+static bool
+mdam_col_atoms_exact(List *col_atoms)
+{
+	ListCell   *lc;
+
+	foreach(lc, col_atoms)
+	{
+		MdamAtom   *atom = (MdamAtom *) lfirst(lc);
+
+		/*
+		 * mdam_extract_interval() collapses an IN list to [min, max], which
+		 * silently fills in the values between its elements.  That bound is
+		 * safe to *narrow* with, but a union built from it covers key space
+		 * the predicate never matched -- so callers that widen have to know
+		 * the interval is only an approximation.
+		 */
+		if (atom->op == MDAM_OP_SAOP && atom->n_in_values > 1)
+			return false;
+	}
+	return true;
+}
 
 /*
  * mdam_extract_interval
@@ -2470,10 +2523,12 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 			List	   *base;
 			List	   *intervals = NIL;
 			List	   *col_atoms_list;
+			List	   *group_paths;
 			MdamInterval *iv;
 			ListCell   *lc2;
 			int			j;
 			bool		group_unconstrained;
+			bool		group_exact;
 
 			if (used[i])
 			{
@@ -2497,6 +2552,14 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 			 * apart when emitting atoms below.
 			 */
 			group_unconstrained = (col_atoms_list == NIL);
+
+			/*
+			 * Merging this group means taking the *union* of its intervals,
+			 * so an approximated interval would hand back key space no arm
+			 * asked for.  Remember whether every contributor is exact.
+			 */
+			group_exact = mdam_col_atoms_exact(col_atoms_list);
+			group_paths = list_make1(path);
 
 			iv = mdam_extract_interval(ctx, col, col_atoms_list);
 			if (iv)
@@ -2524,6 +2587,9 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 
 					if (other_col_atoms == NIL)
 						group_unconstrained = true;
+					if (!mdam_col_atoms_exact(other_col_atoms))
+						group_exact = false;
+					group_paths = lappend(group_paths, other);
 
 					iv = mdam_extract_interval(ctx, col, other_col_atoms);
 					if (iv)
@@ -2535,7 +2601,22 @@ mdam_merge_retrievals(MdamContext *ctx, List *paths)
 			}
 
 			/* Merge the intervals */
-			if (intervals != NIL)
+			if (!group_exact)
+			{
+				/*
+				 * At least one path constrains this column with an IN list,
+				 * which mdam_extract_interval() can only bound as [min, max].
+				 * Uniting those bounds would cover the values the IN list
+				 * skips -- e.g. "r IN (17, 95) OR r BETWEEN 28 AND 58" would
+				 * become "r BETWEEN 17 AND 95".  Leave the group alone; the
+				 * paths stay separate and each keeps its exact atoms.
+				 */
+				ListCell   *lcg;
+
+				foreach(lcg, group_paths)
+					coalesced = lappend(coalesced, (List *) lfirst(lcg));
+			}
+			else if (intervals != NIL)
 			{
 				List	   *merged_ivs = mdam_merge_interval_list(ctx, col,
 																  intervals);
@@ -2874,7 +2955,8 @@ mdam_path_sort_cmp(const void *a, const void *b, void *arg)
  *		sort by index key space, and coalesce adjacent paths.
  */
 static List *
-mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
+mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths,
+						  List **presorted)
 {
 	List	   *all_expanded = NIL;
 	List	   *unique = NIL;
@@ -2986,11 +3068,63 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 					new_paths = lappend(new_paths, p);
 				}
 				else if (list_length(col_atom_list) == 1 &&
-						 (atom->op == MDAM_OP_IS_NULL ||
-						  atom->op == MDAM_OP_IS_NOT_NULL))
+						 atom->op == MDAM_OP_IS_NULL)
 				{
-					/* Single NULL-ness slice: keep as-is (point-like) */
+					/* The NULL slice is a single point in key space. */
 					new_paths = lappend(new_paths, p);
+				}
+				else if (list_length(col_atom_list) == 1 &&
+						 atom->op == MDAM_OP_IS_NOT_NULL)
+				{
+					/*
+					 * IS NOT NULL spans the whole value line, so on a leading
+					 * column it straddles the values that following paths
+					 * constrain, and mdam_detect_ordering_conflict() has to
+					 * reject the entire Append.  Shatter it the way a range is
+					 * shattered instead.
+					 *
+					 * Every btree strategy operator is strict, so the scalar
+					 * elementary intervals below match no NULL row: their
+					 * union is exactly "IS NOT NULL", but each piece is
+					 * ordered with respect to the other paths' critical
+					 * points.  The rewrite is therefore row-equivalent, and it
+					 * keeps the ordered Append available.
+					 */
+					bool		shattered = false;
+
+					crit_pts = mdam_get_critical_points(ctx, col_idx, dnf);
+					/* NULL slice excluded by IS NOT NULL: null_split = false */
+					elem_ivs = mdam_generate_elementary_intervals(ctx, col_idx,
+																  crit_pts, false);
+
+					foreach(alc, elem_ivs)
+					{
+						MdamAtom   *ei = (MdamAtom *) lfirst(alc);
+
+						/*
+						 * No value critical points on this column: there is
+						 * nothing to split against, so leave the slice alone.
+						 */
+						if (ei->op == MDAM_OP_IS_ANYTHING)
+							continue;
+
+						/*
+						 * mdam_generate_elementary_intervals() appends a NULL
+						 * slice whenever it has critical points; IS NOT NULL
+						 * excludes it.
+						 */
+						if (ei->op == MDAM_OP_IS_NULL)
+							continue;
+
+						new_paths = lappend(new_paths,
+											mdam_sort_path_atoms(
+																 lappend(list_copy(base),
+																		 mdam_copy_atom(ctx, ei))));
+						shattered = true;
+					}
+
+					if (!shattered)
+						new_paths = lappend(new_paths, p);
 				}
 				else
 				{
@@ -3114,6 +3248,15 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 	elog(DEBUG1, "MDAM step 4b done: sorted");
 
 	/*
+	 * Hand the caller the sorted-but-not-yet-coalesced set.  Coalescing can
+	 * widen a leading column across key space that a later path occupies,
+	 * which makes the Append unorderable; the caller retries with this finer
+	 * set before giving up.  Both sets cover exactly the same key space, so
+	 * the choice is a pure cost/ordering trade-off, never a correctness one.
+	 */
+	*presorted = list_copy(all_expanded);
+
+	/*
 	 * Step 4c: Coalesce adjacent paths
 	 */
 	changed = true;
@@ -3155,8 +3298,21 @@ mdam_expand_sort_coalesce(MdamContext *ctx, List *dnf, List *paths)
 					{
 						List	   *cur_col_atoms = mdam_atoms_for_col(cur_path, merge_col);
 						List	   *next_col_atoms = mdam_atoms_for_col(next_path, merge_col);
-						MdamInterval *iv1 = mdam_extract_interval(ctx, merge_col, cur_col_atoms);
-						MdamInterval *iv2 = mdam_extract_interval(ctx, merge_col, next_col_atoms);
+						MdamInterval *iv1;
+						MdamInterval *iv2;
+
+						/*
+						 * Same rule as the step-3 group merge: coalescing is a
+						 * union, and an IN list only survives extraction as
+						 * [min, max], so merging on it would widen the path
+						 * across the values the list skips.
+						 */
+						if (!mdam_col_atoms_exact(cur_col_atoms) ||
+							!mdam_col_atoms_exact(next_col_atoms))
+							continue;
+
+						iv1 = mdam_extract_interval(ctx, merge_col, cur_col_atoms);
+						iv2 = mdam_extract_interval(ctx, merge_col, next_col_atoms);
 
 						if (iv1 && iv2)
 						{

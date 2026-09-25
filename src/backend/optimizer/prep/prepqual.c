@@ -35,6 +35,7 @@
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/stratnum.h"
+#include "access/sysattr.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_proc.h"
@@ -42,8 +43,10 @@
 #include "fmgr.h"
 #include "utils/array.h"
 #include "nodes/makefuncs.h"
+#include "nodes/multibitmapset.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "utils/catcache.h"
 #include "utils/hsearch.h"
@@ -239,12 +242,12 @@ static Expr *simplify_or_clause(BoolExpr *orexpr, bool is_check);
 static List *try_range_intersection(List *andlist);
 static Expr *try_or_absorption_boolean(List *orlist);
 static Expr *try_or_absorption(List *orlist);
-static Expr *try_range_union(List *orlist);
+static Expr *try_range_union(List *orlist, bool is_check);
 
 /* OR interval union: extract range per arm, merge overlapping, single interval only */
 static bool extract_range_from_expr(Expr *expr, VarRange *out);
 static List *extract_ranges_from_expr(Expr *expr);
-static Expr *try_or_neq_simplification(List *orlist);
+static Expr *try_or_neq_simplification(List *orlist, bool is_check);
 static bool build_range_from_and(BoolExpr *andexpr, VarRange *out);
 static bool build_range_from_op(Expr *opexpr, VarRange *out);
 static VarRange *copy_var_range(VarRange *r);
@@ -253,7 +256,9 @@ static int	range_lower_cmp(const ListCell *a, const ListCell *b);
 static bool ranges_overlap_or_touch(VarRange *a, VarRange *b);
 static void union_two_ranges(VarRange *a, VarRange *b, VarRange *out);
 static void merge_ranges(List *ranges, VarRange *out, bool *single_interval);
-static Expr *build_and_from_range(VarRange *r);
+static Expr *build_and_from_range(VarRange *r, bool is_check);
+static Expr *make_full_domain_expr(Var *var, bool is_check);
+static List *drop_implied_not_null(List *andargs, List *candidates);
 /* Defensive: merged must be a valid superset of the union of ranges. */
 static bool range_union_sanity_check(List *ranges, VarRange *merged);
 
@@ -748,6 +753,7 @@ static Expr *
 simplify_and_clause(BoolExpr *andexpr, bool is_check)
 {
 	List	   *newargs = NIL;
+	List	   *new_nulltests = NIL;
 	ListCell   *lc;
 
 	foreach(lc, andexpr->args)
@@ -758,6 +764,10 @@ simplify_and_clause(BoolExpr *andexpr, bool is_check)
 			continue;
 		if (is_const_false(arg, is_check))
 			return (Expr *) makeBoolConst(false, false);
+
+		/* remember IS NOT NULL tests made by simplifying an OR arm */
+		if (arg != (Expr *) lfirst(lc) && IsA(arg, NullTest))
+			new_nulltests = lappend(new_nulltests, arg);
 
 		newargs = lappend(newargs, arg);
 	}
@@ -777,6 +787,8 @@ simplify_and_clause(BoolExpr *andexpr, bool is_check)
 		if (!k->constisnull && !DatumGetBool(k->constvalue))
 			return (Expr *) makeBoolConst(false, false);
 	}
+	if (!is_check && new_nulltests != NIL)
+		newargs = drop_implied_not_null(newargs, new_nulltests);
 	if (list_length(newargs) == 1)
 		return (Expr *) linitial(newargs);
 	return make_andclause(newargs);
@@ -821,13 +833,13 @@ simplify_or_clause(BoolExpr *orexpr, bool is_check)
 		return result;
 
 	/* Try range union: (x > 1 AND x < 5) OR (x > 3 AND x < 8) => x > 1 AND x < 8 */
-	result = try_range_union(newargs);
+	result = try_range_union(newargs, is_check);
 	if (result != NULL)
 		return result;
 
 	/* Try not-equal simplification: x <> V OR x = V => true,
 	 *                                x < V OR x > V => x <> V */
-	result = try_or_neq_simplification(newargs);
+	result = try_or_neq_simplification(newargs, is_check);
 	if (result != NULL)
 		return result;
 
@@ -1970,8 +1982,76 @@ range_union_sanity_check(List *ranges, VarRange *merged)
 	return true;
 }
 
+/*
+ * make_full_domain_expr
+ *		Replacement for an OR whose arms cover every non-NULL value of var.
+ *
+ * Such an OR is NULL, not TRUE, when var is NULL.  In WHERE context NULL
+ * acts as FALSE, so the equivalent is "var IS NOT NULL"; in CHECK context
+ * NULL acts as TRUE, so the whole thing is TRUE.
+ */
 static Expr *
-build_and_from_range(VarRange *r)
+make_full_domain_expr(Var *var, bool is_check)
+{
+	NullTest   *ntest;
+
+	if (is_check)
+		return (Expr *) makeBoolConst(true, false);
+
+	ntest = makeNode(NullTest);
+	ntest->arg = (Expr *) copyObject(var);
+	ntest->nulltesttype = IS_NOT_NULL;
+	ntest->argisrow = false;
+	ntest->location = -1;
+	return (Expr *) ntest;
+}
+
+/*
+ * drop_implied_not_null
+ *		Remove "var IS NOT NULL" arms listed in candidates from an AND list
+ *		when another arm is already strict in var.  Only valid in WHERE
+ *		context (NULL acts as FALSE).
+ *
+ * candidates are the tests make_full_domain_expr() produced, e.g. for NOT
+ * BETWEEN SYMMETRIC; IS NOT NULL written by the user is left alone.
+ */
+static List *
+drop_implied_not_null(List *andargs, List *candidates)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	if (list_length(andargs) < 2)
+		return andargs;
+
+	foreach(lc, andargs)
+	{
+		Node	   *arg = (Node *) lfirst(lc);
+
+		if (list_member_ptr(candidates, arg) &&
+			((NullTest *) arg)->nulltesttype == IS_NOT_NULL &&
+			IsA(((NullTest *) arg)->arg, Var) &&
+			((Var *) ((NullTest *) arg)->arg)->varlevelsup == 0)
+		{
+			Var		   *var = (Var *) ((NullTest *) arg)->arg;
+			List	   *others;
+
+			/* already-kept arms plus the ones not yet looked at */
+			others = list_concat_copy(result,
+									  list_copy_tail(andargs,
+													 foreach_current_index(lc) + 1));
+			if (mbms_is_member(var->varno,
+							   var->varattno - FirstLowInvalidHeapAttributeNumber,
+							   find_nonnullable_vars((Node *) others)))
+				continue;
+		}
+		result = lappend(result, arg);
+	}
+	return result;
+}
+
+static Expr *
+build_and_from_range(VarRange *r, bool is_check)
 {
 	List	   *clauses = NIL;
 	Expr	   *eq;
@@ -1998,7 +2078,7 @@ build_and_from_range(VarRange *r)
 			clauses = lappend(clauses, hi);
 	}
 	if (clauses == NIL)
-		return (Expr *) makeBoolConst(true, false);
+		return make_full_domain_expr(r->var, is_check);
 	if (list_length(clauses) == 1)
 		return (Expr *) linitial(clauses);
 	return make_andclause(clauses);
@@ -2009,7 +2089,7 @@ build_and_from_range(VarRange *r)
  * sort by lower, merge overlapping/adjacent; if single interval, return AND expr.
  */
 static Expr *
-try_range_union(List *orlist)
+try_range_union(List *orlist, bool is_check)
 {
 	List	   *ranges = NIL;
 	VarRange   *common = NULL;
@@ -2069,7 +2149,7 @@ try_range_union(List *orlist)
 	if (common != NULL)
 		pfree(common);
 
-	return build_and_from_range(&merged);
+	return build_and_from_range(&merged, is_check);
 
 fail:
 	foreach(lc, ranges)
@@ -2185,14 +2265,14 @@ classify_var_const_op(Expr *expr, Var **var, Const **c, int *strat,
  *		Recognize OR-of-two patterns involving "<>" or paired strict
  *		inequalities and fold them.
  *
- *		x <> V OR x = V    =>  TRUE          (full universe except NULL)
- *		x = V OR x <> V    =>  TRUE          (same, order swapped)
+ *		x <> V OR x = V    =>  x IS NOT NULL (TRUE in CHECK context)
+ *		x = V OR x <> V    =>  x IS NOT NULL (same, order swapped)
  *		x < V OR x > V     =>  x <> V        (when V is the same value)
  *
  * Only fires for two-arm ORs.  Returns NULL if no pattern matches.
  */
 static Expr *
-try_or_neq_simplification(List *orlist)
+try_or_neq_simplification(List *orlist, bool is_check)
 {
 	Expr	   *a,
 			   *b;
@@ -2243,10 +2323,10 @@ try_or_neq_simplification(List *orlist)
 	opa = (OpExpr *) a;
 	opb = (OpExpr *) b;
 
-	/* Pattern 1: x <> V OR x = V  (in either order)  =>  TRUE */
+	/* Pattern 1: x <> V OR x = V  (in either order)  =>  x IS NOT NULL */
 	if ((neq_a && sb == BTEqualStrategyNumber) ||
 		(neq_b && sa == BTEqualStrategyNumber))
-		return (Expr *) makeBoolConst(true, false);
+		return make_full_domain_expr(va, is_check);
 
 	/* Pattern 2: x < V OR x > V  =>  x <> V */
 	if ((sa == BTLessStrategyNumber && sb == BTGreaterStrategyNumber) ||

@@ -278,7 +278,8 @@ WHERE (x <= 5 OR x >= 5);
                 QUERY PLAN                 
 -------------------------------------------
  Seq Scan on inequality_simplification_tab
-(1 row)
+   Filter: (x IS NOT NULL)
+(2 rows)
 
 -- equality as OR arm: (x = 3) OR (x > 5 AND x < 8) => should merge if treated as point range
 EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
@@ -395,7 +396,8 @@ WHERE x <> 5 OR x = 5;
                 QUERY PLAN                 
 -------------------------------------------
  Seq Scan on inequality_simplification_tab
-(1 row)
+   Filter: (x IS NOT NULL)
+(2 rows)
 
 -- order swapped
 EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
@@ -403,7 +405,8 @@ WHERE x = 5 OR x <> 5;
                 QUERY PLAN                 
 -------------------------------------------
  Seq Scan on inequality_simplification_tab
-(1 row)
+   Filter: (x IS NOT NULL)
+(2 rows)
 
 -- x < V OR x > V => x <> V
 EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
@@ -480,5 +483,59 @@ SELECT x FROM inequality_simplification_tab WHERE ((x > 1 AND x < 6) OR (x > 8))
  10
  15
 (7 rows)
+
+-- An OR covering every non-NULL value is "x IS NOT NULL", not TRUE: the
+-- NULL row must not come back (NOT BETWEEN with an empty range is pushed
+-- down to such an OR before canonicalize_qual sees it).
+INSERT INTO inequality_simplification_tab VALUES (NULL, NULL);
+EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
+  WHERE NOT (x BETWEEN 10 AND 1);
+                QUERY PLAN                 
+-------------------------------------------
+ Seq Scan on inequality_simplification_tab
+   Filter: (x IS NOT NULL)
+(2 rows)
+
+SELECT count(*) FROM inequality_simplification_tab WHERE NOT (x BETWEEN 10 AND 1);
+ count 
+-------
+    12
+(1 row)
+
+SELECT count(*) FROM inequality_simplification_tab WHERE x < 10 OR x >= 3;
+ count 
+-------
+    12
+(1 row)
+
+SELECT count(*) FROM inequality_simplification_tab WHERE x <> 5 OR x = 5;
+ count 
+-------
+    12
+(1 row)
+
+SELECT count(*) FROM inequality_simplification_tab WHERE x IS NOT NULL;
+ count 
+-------
+    12
+(1 row)
+
+-- the generated IS NOT NULL is dropped when another arm is strict in x
+EXPLAIN (COSTS OFF) SELECT * FROM inequality_simplification_tab
+  WHERE x NOT BETWEEN SYMMETRIC 3 AND 8;
+                QUERY PLAN                 
+-------------------------------------------
+ Seq Scan on inequality_simplification_tab
+   Filter: ((x < 3) OR (x > 8))
+(2 rows)
+
+-- NULL on the nullable side of an outer join
+SELECT count(*) FROM inequality_simplification_tab a
+  LEFT JOIN inequality_simplification_tab b ON false
+  WHERE NOT (b.x BETWEEN 10 AND 1);
+ count 
+-------
+     0
+(1 row)
 
 DROP TABLE inequality_simplification_tab;
